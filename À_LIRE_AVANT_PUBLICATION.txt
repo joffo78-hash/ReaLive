@@ -1,0 +1,7 @@
+REALIVE — À LIRE AVANT PUBLICATION
+
+- Le script d'origine a été conservé ; seules des métadonnées ReaPack ont été ajoutées au début.
+- Le fichier est placé dans Scripts/Realive/ afin que ReaPack puisse le détecter.
+- Ne pas annoncer la compatibilité Windows/macOS/Linux comme validée : la partie OSC utilise actuellement un chemin de chargement Windows.
+- Après l'envoi sur GitHub, vérifier l'onglet Actions et confirmer que l'indexation a réussi.
+- Vérifier ensuite que index.xml existe à la racine du dépôt avant d'ajouter l'URL dans ReaPack.
