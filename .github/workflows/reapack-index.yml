@@ -1,0 +1,41 @@
+name: ReaPack index
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "Realive ReaPack Bot"
+          git config user.email "actions@users.noreply.github.com"
+
+      - name: Install Pandoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+
+      - name: Install reapack-index
+        run: gem install reapack-index
+
+      - name: Generate ReaPack index
+        run: reapack-index --name "Realive" --commit
+
+      - name: Push generated index
+        run: git push
