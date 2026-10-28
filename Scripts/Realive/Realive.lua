@@ -1,5 +1,5 @@
 -- @description Realive — système de cues pour REAPER
--- @version 1.0
+-- @version 1.01
 -- @author joffo78-hash
 -- @about
 --   Realive est un système de lancement de cues pour REAPER.
