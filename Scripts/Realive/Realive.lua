@@ -1,14 +1,11 @@
 -- @description Realive — système de cues pour REAPER
--- @version 1.01
+-- @version 1.2
 -- @author joffo78-hash
+-- @link https://github.com/joffo78-hash/Realive
 -- @about
---   Realive est un système de lancement de cues pour REAPER.
---   Nécessite REAPER et ReaImGui. La compatibilité multiplateforme
---   et la fonction OSC restent à vérifier avant une annonce publique.
--- @changelog
---   Première version préparée pour l'indexation ReaPack.
+--   Realive est un système de cues de type QLab pour REAPER.
+--   Nécessite ReaImGui. Les fonctions OSC nécessitent Mavriq Lua Sockets.
 --
-
 -- ActionList.lua
 -- Playlist d'actions type QLab pour REAPER (ReaImGui)
 -- Types : CUE, STOP, PRESET, OSC, MIDI
@@ -154,8 +151,9 @@ local stop_until = {}
 -- Enchaînement automatique : compte à rebours de la cue source vers la suivante.
 local auto_chain = nil
 local ext_runs = {}
-local ANTICLICK = 0.03
+local ANTICLICK = 0.003 -- protection anti-clic minimale, sans délai ajouté
 local stop_fade = tonumber(reaper.GetExtState(EXT, "stopfade")) or 1.0
+local stop_curve = tonumber(reaper.GetExtState(EXT, "stopcurve")) or 0.5
 
 local prefs = {
   auto_stop       = false,
@@ -192,6 +190,7 @@ local function ser(v)
 end
 
 local function rebuild_id_map()
+  if tabs and tabs[active_tab] and actions then tabs[active_tab].actions = actions end
   actions_by_id = {}
   for _, tab in ipairs(tabs or {}) do
     for _, a in ipairs(tab.actions or {}) do
@@ -210,6 +209,7 @@ local history_restoring = false
 local HISTORY_LIMIT = 100
 
 local function current_data_string()
+  if tabs and tabs[active_tab] and actions then tabs[active_tab].actions = actions end
   return ser({ actions = actions, tabs = tabs, active_tab = active_tab, next_id = next_id, prefs = prefs })
 end
 
@@ -236,6 +236,7 @@ local function restore_history_state(data)
     tabs = d.tabs
     for _, tab in ipairs(tabs) do tab.name = tab.name or "Liste"; tab.actions = tab.actions or {} end
     active_tab = d.active_tab or 1
+    if type(d.actions) == "table" and tabs[active_tab] then tabs[active_tab].actions = d.actions end
     sync_active_tab()
   else
     actions = d.actions or {}
@@ -283,6 +284,7 @@ local function load_data()
           tabs = d.tabs
           for _, tab in ipairs(tabs) do tab.name = tab.name or "Liste"; tab.actions = tab.actions or {} end
           active_tab = d.active_tab or 1
+          if type(d.actions) == "table" and tabs[active_tab] then tabs[active_tab].actions = d.actions end
           sync_active_tab()
         else
           actions = d.actions or {}
@@ -478,6 +480,15 @@ local function env_gain(env, t)
   return 1
 end
 
+-- Volume (linéaire) d'un item de cue à l'instant source t :
+-- enveloppe × gain de la cue (dB lu EN DIRECT, donc cohérent quand on bouge le réglage).
+function X.cue_vol(id, env, t)
+  local cue = actions_by_id[id] or actions_by_id[tostring(id)]
+  local db = cue and tonumber(cue.wave_gain_db) or 0
+  local e = (env and #env > 0) and env_gain(env, t) or 1
+  return e * (10 ^ (db / 20))
+end
+
 local function kill_runs(ids)
   if not ids then
     for _, r in pairs(runs) do r.alive = false end
@@ -515,6 +526,10 @@ local function add_file_item(dest, file, pos, tin, seg, fadein, gain, id, marker
   reaper.SetMediaItemInfo_Value(new, "D_LENGTH", proj_len)
   reaper.SetMediaItemInfo_Value(new, "D_FADEINLEN", math.min(fadein or 0, proj_len))
   reaper.SetMediaItemInfo_Value(new, "D_FADEOUTLEN", 0)
+  -- Courbe native REAPER : 0 linéaire, valeurs croissantes = formes plus marquées.
+  local curve_shape = math.max(0, math.min(6, math.floor((tonumber(cue and cue.fade_curve) or 0) * 6 + 0.5)))
+  reaper.SetMediaItemInfo_Value(new, "D_FADEINSHAPE", curve_shape)
+  reaper.SetMediaItemInfo_Value(new, "D_FADEOUTSHAPE", curve_shape)
   if ntk and type(markers) == "table" and reaper.SetTakeMarker then
     local src_start = tonumber(tin) or 0
     local src_end = src_start + (tonumber(seg) or 0)
@@ -1015,7 +1030,7 @@ local function process_runs(now)
               if tk then
                 local startoffs = reaper.GetMediaItemTakeInfo_Value(tk, "D_STARTOFFS") or r.tin
                 local rel_t = startoffs + (pe - pos) * speed
-                local v = env_gain(r.env, rel_t)
+                local v = X.cue_vol(id, r.env, rel_t)
                 if math.abs(reaper.GetMediaItemTakeInfo_Value(tk, "D_VOL") - v) > 0.002 then
                   reaper.SetMediaItemTakeInfo_Value(tk, "D_VOL", v)
                 end
@@ -1530,7 +1545,42 @@ local function stop_all(dur)
     end
   end
 
-  -- 2) Items encore en cours / futurs : fondu puis nettoyage.
+  -- 2) Items encore en cours / futurs.
+  -- À durée 0, on ne planifie aucun fondu logiciel : on termine les items
+  -- au curseur avec seulement 3 ms de fade anti-clic.
+  if dur <= 0 then
+    local cutoff = p + ANTICLICK
+    for i = reaper.CountMediaItems(PROJ)-1, 0, -1 do
+      local it = reaper.GetMediaItem(PROJ, i)
+      local _, mark = reaper.GetSetMediaItemInfo_String(it, "P_EXT:cuelist", "", false)
+      if mark == "1" then
+        local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+        local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
+        local finish = pos + len
+        if finish > p then
+          if pos >= cutoff then
+            if prefs.delete_on_stop == true then
+              reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(it), it)
+            else
+              reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN", ANTICLICK)
+            end
+          else
+            local new_end = math.min(finish, cutoff)
+            reaper.SetMediaItemInfo_Value(it, "D_LENGTH", math.max(0.001, new_end - pos))
+            reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN", math.min(ANTICLICK, math.max(0, new_end - pos)))
+            if prefs.delete_on_stop == true then
+              local _, guid = reaper.GetSetMediaItemInfo_String(it, "GUID", "", false)
+              del_jobs[#del_jobs + 1] = { at = reaper.time_precise() + ANTICLICK + 0.02, guids = {[guid]=true} }
+            end
+          end
+        end
+      end
+    end
+    reaper.UpdateArrange()
+    status = "STOP : immédiat (protection anti-clic 3 ms)."
+    return
+  end
+
   for i = 0, reaper.CountMediaItems(PROJ)-1 do
     local it = reaper.GetMediaItem(PROJ, i)
     local _, mark = reaper.GetSetMediaItemInfo_String(it, "P_EXT:cuelist", "", false)
@@ -1590,8 +1640,10 @@ local function stop_targets(ids, dur)
   stop_ext(ids, dur)
   local set = {}
   for _, id in ipairs(ids) do set[tostring(id)] = true end
-  local t_start = now_pos() + margin/1000
-  local t_end = t_start + dur
+  local immediate = dur <= 0
+  local t_start = now_pos() + (immediate and 0 or margin/1000)
+  local effective_dur = immediate and ANTICLICK or dur
+  local t_end = t_start + effective_dur
   local n, affected = 0, {}
   for i = reaper.CountMediaItems(PROJ)-1, 0, -1 do
     local it = reaper.GetMediaItem(PROJ, i)
@@ -1601,7 +1653,23 @@ local function stop_targets(ids, dur)
       local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
       if pos + len > t_start then
         n = n + 1
-        if prefs.delete_on_stop == true then
+        if immediate then
+          if pos >= t_start + ANTICLICK then
+            if prefs.delete_on_stop == true then
+              reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(it), it)
+            else
+              reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN", ANTICLICK)
+            end
+          else
+            local new_end = math.min(pos + len, t_start + ANTICLICK)
+            reaper.SetMediaItemInfo_Value(it, "D_LENGTH", math.max(0.001, new_end - pos))
+            reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN", math.min(ANTICLICK, math.max(0, new_end-pos)))
+            if prefs.delete_on_stop == true then
+              local _, g = reaper.GetSetMediaItemInfo_String(it, "GUID", "", false)
+              affected[g] = true
+            end
+          end
+        elseif prefs.delete_on_stop == true then
           -- Option coché : on coupe / programme la suppression.
           if pos >= t_start then
             reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(it), it)
@@ -1625,14 +1693,15 @@ local function stop_targets(ids, dur)
     local id_set = {}
     for id in pairs(set) do id_set[id] = true end
     del_jobs[#del_jobs + 1] = {
-      at = reaper.time_precise() + margin/1000 + dur + 0.25,
+      at = reaper.time_precise() + (immediate and ANTICLICK or margin/1000 + dur) + 0.05,
       cue_ids = id_set,
       guids = next(affected) and affected or nil
     }
   end
   reaper.UpdateArrange()
-  status = string.format("STOP ciblé : fade de %.1f s, %d item(s)%s",
-    dur, n, prefs.delete_on_stop == true and " → suppression" or " (items conservés)")
+  status = immediate
+    and string.format("STOP ciblé immédiat (protection 3 ms) : %d item(s)%s", n, prefs.delete_on_stop == true and " → suppression" or " (items conservés)")
+    or string.format("STOP ciblé : fade de %.1f s, %d item(s)%s", dur, n, prefs.delete_on_stop == true and " → suppression" or " (items conservés)")
 end
 
 function X.apply_linked_preset(a, dur)
@@ -1643,7 +1712,7 @@ function X.apply_linked_preset(a, dur)
 end
 
 local function fire_stop(a)
-  local dur = a.dur or 1
+  local dur = math.max(0, tonumber(a.dur) or 0) -- 0 = arrêt immédiat ; la protection de 3 ms est appliquée aux items
   -- Le champ Q1,Q8 est la source de vérité lorsqu'il est présent.
   if type(a.targets_text) == "string" then
     local parsed, seen, invalid = {}, {}, false
@@ -1661,7 +1730,7 @@ local function fire_stop(a)
   end
   local targeted = a.targets and #a.targets > 0
   if a.id then
-    stop_until[a.id] = reaper.time_precise() + dur + 0.2 + (targeted and margin/1000 or 0)
+    stop_until[a.id] = reaper.time_precise() + math.max(0.003, dur) + 0.2
   end
   if targeted then stop_targets(a.targets, dur) else stop_all(dur) end
   X.apply_linked_preset(a, dur)
@@ -1669,7 +1738,7 @@ local function fire_stop(a)
   -- Après le fondu seulement, sinon ESC coupe le fade net.
   if prefs.auto_stop then
     del_jobs[#del_jobs + 1] = {
-      at = reaper.time_precise() + math.max(0.01, dur) + 0.05,
+      at = reaper.time_precise() + (dur > 0 and dur or 0.003) + 0.005,
       stop_transport = true
     }
   end
@@ -1729,6 +1798,9 @@ local function capture(tr)
   local p = {
     vol = reaper.GetMediaTrackInfo_Value(tr, "D_VOL"),
     pan = reaper.GetMediaTrackInfo_Value(tr, "D_PAN"),
+    mute = reaper.GetMediaTrackInfo_Value(tr, "B_MUTE") >= 0.5,
+    solo = math.floor(reaper.GetMediaTrackInfo_Value(tr, "I_SOLO") + 0.5), -- 0 / 1 / 2 (SIP)
+    arm  = reaper.GetMediaTrackInfo_Value(tr, "I_RECARM") >= 0.5,
     fx = {}
   }
   for i = 0, reaper.TrackFX_GetCount(tr)-1 do
@@ -1801,12 +1873,21 @@ local function start_morph(m)
   for _, e in ipairs(m.enables or {}) do
     reaper.TrackFX_SetEnabled(e.tr, e.fx, e.val)
   end
+  for _, f in ipairs(m.track_flags or {}) do
+    if f.k == "mute" then
+      reaper.SetMediaTrackInfo_Value(f.tr, "B_MUTE", f.val)
+    elseif f.k == "solo" then
+      reaper.SetMediaTrackInfo_Value(f.tr, "I_SOLO", f.val)
+    elseif f.k == "arm" then
+      reaper.SetMediaTrackInfo_Value(f.tr, "I_RECARM", f.val)
+    end
+  end
 end
 
 apply_snap = function(a, dur, delay)
   ensure_snap(a)
-  local use = a.use or {vol=true, pan=true, fxen=true, fxpar=true}
-  local steps, enables, warns, ntr = {}, {}, {}, 0
+  local use = a.use or {vol=true, pan=true, mute=true, solo=true, arm=true, fxen=true, fxpar=true}
+  local steps, enables, track_flags, warns, ntr = {}, {}, {}, {}, 0
   if not a.snap then return 0, warns end
   for _, g in ipairs(a.snap.order) do
     local d = a.snap.tracks[g]
@@ -1821,6 +1902,16 @@ apply_snap = function(a, dur, delay)
         end
         if use.pan and d.pan then
           steps[#steps+1] = {k="pan", tr=tr, to=d.pan, key=g.."|pan"}
+        end
+        -- Mute / Solo / Arm : appliqués immédiatement au démarrage du morph (comme les enables FX).
+        if use.mute and d.mute ~= nil then
+          track_flags[#track_flags+1] = {tr=tr, k="mute", val=d.mute and 1 or 0}
+        end
+        if use.solo and d.solo ~= nil then
+          track_flags[#track_flags+1] = {tr=tr, k="solo", val=tonumber(d.solo) or 0}
+        end
+        if use.arm and d.arm ~= nil then
+          track_flags[#track_flags+1] = {tr=tr, k="arm", val=d.arm and 1 or 0}
         end
         for i, f in ipairs(d.fx or {}) do
           if f.use then
@@ -1848,7 +1939,7 @@ apply_snap = function(a, dur, delay)
   end
   dur, delay = dur or 0, delay or 0
   local m = {
-    steps = steps, enables = enables,
+    steps = steps, enables = enables, track_flags = track_flags,
     t0 = reaper.time_precise() + math.max(0, delay),
     dur = math.max(dur, 0.001)
   }
@@ -1873,6 +1964,7 @@ local function fire_preset(a)
 end
 
 ---------------------------------------------------------------- OSC / MIDI
+X.led = {} -- id d'action -> instant du dernier envoi (témoin LED)
 local function send_osc(port_def, address, args)
   if not has_socket then
     status = "OSC : Mavriq Lua Sockets 1.2 absent ou non chargeable."
@@ -1898,8 +1990,10 @@ local function send_osc(port_def, address, args)
     end
     status = string.format("OSC → %s (%s:%d)  %s%s",
       port_def.name or "?", port_def.ip, port_def.port, address or "/", argstr)
+    return true
   else
     status = "OSC : échec d'envoi ("..tostring(err)..")"
+    return false
   end
 end
 
@@ -1912,7 +2006,7 @@ local function fire_osc(a)
     status = "OSC \""..(a.name or "").."\" : port \""..(a.port_name or "").."\" introuvable."
     return
   end
-  send_osc(port_def, a.address or "/", a.args)
+  if send_osc(port_def, a.address or "/", a.args) then X.led[a.id] = reaper.time_precise() end
 end
 
 -- Configure la piste relais : Virtual Keyboard + arm + monitoring.
@@ -2022,6 +2116,7 @@ local function fire_midi(a)
     return
   end
 
+  X.led[a.id] = reaper.time_precise()
   status = string.format('MIDI "%s" → « %s » via relais « %s » (%s, canal %d)',
     a.name or "", track_name(tr), MIDI_RELAY_NAME, detail, ch + 1)
 end
@@ -2258,7 +2353,17 @@ local function process_jobs()
         cleanup_track(j.tr, j.keep)
         j.done = now
       else
-        local gain = (1-p)^2
+        -- Courbe de gain du fade-out :
+        -- minimum = logarithmique marqué (le niveau baisse très vite),
+        -- milieu = linéaire, maximum = exponentiel marqué (le niveau reste
+        -- haut longtemps puis chute surtout à la fin).
+        local shape
+        if stop_curve <= 0.5 then
+          shape = 0.25 + 1.5 * stop_curve -- 0.25 -> 1
+        else
+          shape = 1 + 6 * (stop_curve - 0.5) -- 1 -> 4
+        end
+        local gain = 1 - (p ^ shape)
         for _, saved in ipairs(j.items or {}) do
           for k = 0, reaper.CountMediaItems(PROJ)-1 do
             local it = reaper.GetMediaItem(PROJ, k)
@@ -2426,6 +2531,29 @@ local function pick_only(a, i)
   selected = a.id
 end
 
+-- Supprime les actions sélectionnées par leur titre (liste active).
+function X.delete_picked()
+  local n, first_i = 0, nil
+  for i = #actions, 1, -1 do
+    if picked[actions[i].id] then
+      if selected == actions[i].id then selected = nil end
+      table.remove(actions, i)
+      n = n + 1
+      first_i = i
+    end
+  end
+  if n == 0 then return false end
+  picked = {}
+  pick_anchor = nil
+  if not selected and #actions > 0 then
+    local nxt = actions[math.min(first_i or 1, #actions)]
+    picked = {[nxt.id] = true}; selected = nxt.id; pick_anchor = math.min(first_i or 1, #actions)
+  end
+  save()
+  status = n .. " action(s) supprimée(s) (Ctrl/Cmd+Suppr)."
+  return true
+end
+
 local function pick_range(from_i, to_i)
   if from_i > to_i then from_i, to_i = to_i, from_i end
   picked = {}
@@ -2539,6 +2667,10 @@ local function move_rows(from, to)
     table.insert(staying, insert_at + i - 1, a)
   end
   actions = staying
+  -- La liste affichée a été recréée : la rattacher à son onglet, sinon les cues créées
+  -- ensuite n'existent que dans `actions` (introuvables par les captures, les marqueurs,
+  -- la table des IDs, et perdues à la réouverture).
+  if tabs[active_tab] then tabs[active_tab].actions = actions end
   save()
 end
 
@@ -2587,9 +2719,9 @@ local function add_action(t)
   local names = {cue="Cue", preset="Preset", stop="Stop cues", pause="Pause", devamp="Devamp", osc="OSC", midi="MIDI"}
   local a = {id = next_id, type = t, name = names[t].." "..next_id}
   if t == "cue" then a.fadein = 0; a.track = default_track_guid() end
-  if t == "stop" then a.dur = 1.0 end
+  if t == "stop" then a.dur = 0.0 end
   if t == "pause" then a.dur = 0.5; a.unpause = false end
-  if t == "preset" then a.dur = 0.0; a.use = {vol=true, pan=true, fxen=true, fxpar=true} end
+  if t == "preset" then a.dur = 0.0; a.use = {vol=true, pan=true, mute=true, solo=true, arm=true, fxen=true, fxpar=true} end
   if t == "osc" then a.port_name = ""; a.address = "/"; a.args = {} end
   if t == "midi" then
     a.midi_type = "note"; a.channel = 1
@@ -2606,7 +2738,7 @@ end
 ---------------------------------------------------------------- Snap editor
 local function draw_snap_editor(a)
   ensure_snap(a)
-  a.use = a.use or {vol=true, pan=true, fxen=true, fxpar=true}
+  a.use = a.use or {vol=true, pan=true, mute=true, solo=true, arm=true, fxen=true, fxpar=true}
   if reaper.ImGui_Button(ctx, "Capturer les pistes sélectionnées") then
     local n = reaper.CountSelectedTracks(PROJ)
     if n == 0 then
@@ -2645,6 +2777,12 @@ local function draw_snap_editor(a)
     reaper.ImGui_SameLine(ctx)
     x, u.pan   = reaper.ImGui_Checkbox(ctx, "Pan", u.pan)     ; if x then save() end
     reaper.ImGui_SameLine(ctx)
+    x, u.mute  = reaper.ImGui_Checkbox(ctx, "Mute", u.mute)   ; if x then save() end
+    reaper.ImGui_SameLine(ctx)
+    x, u.solo  = reaper.ImGui_Checkbox(ctx, "Solo", u.solo)   ; if x then save() end
+    reaper.ImGui_SameLine(ctx)
+    x, u.arm   = reaper.ImGui_Checkbox(ctx, "Armer", u.arm)   ; if x then save() end
+    reaper.ImGui_SameLine(ctx)
     x, u.fxen  = reaper.ImGui_Checkbox(ctx, "FX actif/bypass", u.fxen) ; if x then save() end
     reaper.ImGui_SameLine(ctx)
     x, u.fxpar = reaper.ImGui_Checkbox(ctx, "Paramètres FX", u.fxpar) ; if x then save() end
@@ -2673,7 +2811,7 @@ local C_LEFT, C_RIGHT = reaper.ImGui_MouseButton_Left(), reaper.ImGui_MouseButto
 local function get_wave(file)
   local w = wave_cache[file]
   if w then return w end
-  w = {}
+  w = {views = {}}
   wave_cache[file] = w
   local src = reaper.PCM_Source_CreateFromFile(file)
   if not src then w.err = "Fichier illisible." return w end
@@ -2686,7 +2824,8 @@ local function get_wave(file)
   w.len = len
   w.nch_full = reaper.GetMediaSourceNumChannels(src)
   local nch = math.max(1, math.min(2, w.nch_full))
-  local N = 1200
+  -- Aperçu global (zoom 1×) : résolution de base plus élevée.
+  local N = 4096
   local buf = reaper.new_array(N * nch * 2)
   buf.clear()
   local ret = reaper.PCM_Source_GetPeaks(src, N / len, 0, nch, N, 0, buf)
@@ -2706,6 +2845,50 @@ local function get_wave(file)
     w.min[sidx] = math.max(-1, math.min(1, mn))
   end
   return w
+end
+
+-- Peaks pour la fenêtre visible uniquement : plus on zoom, plus le détail augmente.
+local function get_wave_view(file, t0, t1, n_samples)
+  local w = get_wave(file)
+  if not w or w.err or not w.len then return nil end
+  n_samples = math.max(64, math.min(8192, math.floor(n_samples + 0.5)))
+  t0 = math.max(0, t0 or 0)
+  t1 = math.min(w.len, t1 or w.len)
+  if t1 <= t0 + 1e-9 then return nil end
+  local key = string.format("%.5f|%.5f|%d", t0, t1, n_samples)
+  w.views = w.views or {}
+  local cached = w.views[key]
+  if cached then return cached end
+  -- Limiter le nombre d'entrées de cache de vues.
+  local nkeys = 0
+  for _ in pairs(w.views) do nkeys = nkeys + 1 end
+  if nkeys > 24 then w.views = {} end
+  local src = reaper.PCM_Source_CreateFromFile(file)
+  if not src then return nil end
+  local nch = math.max(1, math.min(2, w.nch_full or 1))
+  local span = t1 - t0
+  local peakrate = n_samples / span
+  local buf = reaper.new_array(n_samples * nch * 2)
+  buf.clear()
+  local ret = reaper.PCM_Source_GetPeaks(src, peakrate, t0, nch, n_samples, 0, buf)
+  reaper.PCM_Source_Destroy(src)
+  local cnt = math.floor(ret) & 0xFFFFF
+  if cnt <= 0 then return nil end
+  local vmaxs, vmins = {}, {}
+  for sidx = 1, cnt do
+    local mx, mn = -1, 1
+    for c = 0, nch-1 do
+      local vmax = buf[(sidx-1)*nch + c + 1]
+      local vmin = buf[n_samples*nch + (sidx-1)*nch + c + 1]
+      if vmax > mx then mx = vmax end
+      if vmin < mn then mn = vmin end
+    end
+    vmaxs[sidx] = math.max(-1, math.min(1, mx))
+    vmins[sidx] = math.max(-1, math.min(1, mn))
+  end
+  cached = {max = vmaxs, min = vmins, n = cnt, t0 = t0, t1 = t1}
+  w.views[key] = cached
+  return cached
 end
 
 local function g_to_frac(g)
@@ -2748,7 +2931,7 @@ local function apply_cue_changes(a)
         local pnow = now_pos()
         local elapsed = math.max(0, pnow - (r.t0 or pnow))
         local rel = r.loop and (r.proj_seg > 0 and (elapsed % r.proj_seg) or 0) or math.min(elapsed, r.proj_seg)
-        local gain = env_gain(r.env, r.tin + rel * r.speed)
+        local gain = X.cue_vol(a.id, r.env, r.tin + rel * r.speed)
         reaper.SetMediaItemTakeInfo_Value(tk, "D_VOL", gain)
         local dest = find_track(r.dest_guid)
         if dest then
@@ -2760,12 +2943,16 @@ local function apply_cue_changes(a)
               if otk then
                 local opos = reaper.GetMediaItemInfo_Value(other, "D_POSITION")
                 local olen = reaper.GetMediaItemInfo_Value(other, "D_LENGTH")
-                reaper.SetMediaItemTakeInfo_Value(otk, "D_STARTOFFS", r.tin)
-                reaper.SetMediaItemTakeInfo_Value(otk, "D_PLAYRATE", r.speed)
-                if math.abs(olen - r.proj_seg) > 0.001 then reaper.SetMediaItemInfo_Value(other, "D_LENGTH", r.proj_seg) end
-                local local_t = r.tin + math.max(0, pnow - opos) * r.speed
-                if r.loop and r.seg > 0 then local_t = r.tin + ((local_t - r.tin) % r.seg) end
-                reaper.SetMediaItemTakeInfo_Value(otk, "D_VOL", env_gain(r.env, local_t))
+                -- On conserve la portion de source de chaque item (reprise après pause…) :
+                -- seule la durée projet suit la vitesse.
+                local orate = reaper.GetMediaItemTakeInfo_Value(otk, "D_PLAYRATE")
+                if orate and orate > 0 and math.abs(orate - r.speed) > 1e-9 then
+                  reaper.SetMediaItemInfo_Value(other, "D_LENGTH", math.max(0.001, olen * orate / r.speed))
+                  reaper.SetMediaItemTakeInfo_Value(otk, "D_PLAYRATE", r.speed)
+                end
+                local oso = reaper.GetMediaItemTakeInfo_Value(otk, "D_STARTOFFS") or r.tin
+                local local_t = oso + math.max(0, pnow - opos) * r.speed
+                reaper.SetMediaItemTakeInfo_Value(otk, "D_VOL", X.cue_vol(a.id, r.env, local_t))
                 reaper.UpdateItemInProject(other)
               end
             end
@@ -2933,8 +3120,7 @@ local function apply_wave_cue_props(a)
         local tk = reaper.GetActiveTake(it)
         if tk then
           local startoffs = reaper.GetMediaItemTakeInfo_Value(tk, "D_STARTOFFS") or 0
-          local env_base = (type(a.env) == "table" and #a.env > 0) and env_gain(a.env, startoffs) or 1
-          reaper.SetMediaItemTakeInfo_Value(tk, "D_VOL", env_base * gain)
+          reaper.SetMediaItemTakeInfo_Value(tk, "D_VOL", X.cue_vol(a.id, a.env, startoffs))
           reaper.SetMediaItemTakeInfo_Value(tk, "D_PAN", pan)
           local old_rate = reaper.GetMediaItemTakeInfo_Value(tk, "D_PLAYRATE")
           if not old_rate or old_rate <= 0 then old_rate = 1 end
@@ -2958,6 +3144,63 @@ local function apply_wave_cue_props(a)
     if r.loop then replan_loop_run(a, r) end
   end
   if changed > 0 then reaper.UpdateArrange() end
+end
+
+-- Cues audio sélectionnées (par titre) dans tous les onglets, au format "Q1,Q8".
+-- Réservé à STOP / Pause / Devamp : seules les actions type "cue" sont retenues.
+function X.picked_cue_names()
+  local parts = {}
+  for _, tab in ipairs(tabs or {}) do
+    for _, x in ipairs(tab.actions or {}) do
+      if picked[x.id] and x.type == "cue" then parts[#parts+1] = "Q" .. tostring(x.id) end
+    end
+  end
+  return table.concat(parts, ","), #parts
+end
+
+-- Actions sélectionnées (par titre) quel que soit le type (CUE, OSC, MIDI, PRESET…).
+-- Utilisé uniquement pour la capture dans les marqueurs take.
+function X.picked_any_names()
+  local parts = {}
+  for _, tab in ipairs(tabs or {}) do
+    for _, x in ipairs(tab.actions or {}) do
+      if picked[x.id] then parts[#parts+1] = "Q" .. tostring(x.id) end
+    end
+  end
+  return table.concat(parts, ","), #parts
+end
+
+-- Les marqueurs Qx sont lus sur les TAKE MARKERS des items déjà posés sur la timeline :
+-- après toute modification (nom, capture, position, ajout, suppression) il faut les
+-- réécrire sur les items existants de la cue, sinon rien ne change à la lecture.
+X.marker_sel, X.cap_n = {}, {}
+function X.refresh_item_markers(a)
+  if not (reaper.SetTakeMarker and reaper.GetNumTakeMarkers and reaper.DeleteTakeMarker) then return end
+  local sid, n = tostring(a.id), 0
+  for i = 0, reaper.CountMediaItems(PROJ) - 1 do
+    local it = reaper.GetMediaItem(PROJ, i)
+    local _, cid = reaper.GetSetMediaItemInfo_String(it, "P_EXT:cuelist_id", "", false)
+    if cid == sid then
+      local tk = reaper.GetActiveTake(it)
+      if tk and not reaper.TakeIsMIDI(tk) then
+        for m = reaper.GetNumTakeMarkers(tk) - 1, 0, -1 do reaper.DeleteTakeMarker(tk, m) end
+        local so = reaper.GetMediaItemTakeInfo_Value(tk, "D_STARTOFFS") or 0
+        local rate = reaper.GetMediaItemTakeInfo_Value(tk, "D_PLAYRATE")
+        if not rate or rate <= 0 then rate = 1 end
+        local se = so + reaper.GetMediaItemInfo_Value(it, "D_LENGTH") * rate
+        for _, marker in ipairs(a.markers or {}) do
+          local mt = tonumber(marker.t)
+          local mn = tostring(marker.name or ""):gsub("^%s+", ""):gsub("%s+$", "")
+          if mt and mn ~= "" and mt >= so - 1e-6 and mt <= se + 1e-6 then
+            reaper.SetTakeMarker(tk, -1, mn, mt, tonumber(marker.color) or 0)
+          end
+        end
+        reaper.UpdateItemInProject(it)
+        n = n + 1
+      end
+    end
+  end
+  return n
 end
 
 -- Réglages de lecture (gain / pan / vitesse / pitch) : section repliable,
@@ -3044,36 +3287,80 @@ local function draw_wave_editor(a)
   a.loop_out = math.max(a.loop_in + 0.01, math.min(tonumber(a.loop_out) or a.outpt, a.outpt))
   a.env   = a.env or {}
 
-  reaper.ImGui_SetNextItemWidth(ctx, S(180))
-  local cmn, marker_name = reaper.ImGui_InputText(ctx, "Nom du marqueur##new_take_marker", a.marker_name)
-  if cmn then a.marker_name = marker_name; save() end
-  reaper.ImGui_SameLine(ctx)
-  if reaper.ImGui_Button(ctx, "Ajouter marqueur##new_take_marker") then
-    local name = tostring(a.marker_name or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    if name == "" then
-      status = "Indique un nom de marqueur avant de l'ajouter."
-    else
-      local lo = math.max(0, math.min(L, a.inpt or 0))
-      local hi = math.max(lo, math.min(L, a.outpt or L))
-      local best_t, best_gap = (lo + hi) * 0.5, -1
-      local span = hi - lo
-      if #a.markers > 0 then
-        for n = 1, 120 do
-          local candidate = lo + span * (n / 121)
-          local nearest = math.huge
-          for _, existing in ipairs(a.markers) do
-            local et = tonumber(existing.t)
-            if et then nearest = math.min(nearest, math.abs(candidate - et)) end
-          end
-          if nearest > best_gap then best_t, best_gap = candidate, nearest end
+  X.cap_n[a.id] = X.cap_n[a.id] or 0
+  -- Barre des marqueurs : Ajouter (crée un champ vide), Capturer cues, Supprimer.
+  -- Les deux dernières agissent sur le marqueur dont le curseur est (ou était en dernier)
+  -- dans le champ de nom (repéré par ►).
+  if reaper.ImGui_Button(ctx, "Ajouter marqueur##mk_add") then
+    local lo = math.max(0, math.min(L, a.inpt or 0))
+    local hi = math.max(lo, math.min(L, a.outpt or L))
+    local best_t, best_gap = (lo + hi) * 0.5, -1
+    local span = hi - lo
+    if #a.markers > 0 then
+      for n = 1, 120 do
+        local candidate = lo + span * (n / 121)
+        local nearest = math.huge
+        for _, existing in ipairs(a.markers) do
+          local et = tonumber(existing.t)
+          if et then nearest = math.min(nearest, math.abs(candidate - et)) end
         end
+        if nearest > best_gap then best_t, best_gap = candidate, nearest end
       end
-      a.markers[#a.markers + 1] = {t = best_t, name = name, color = 0}
-      table.sort(a.markers, function(p, q) return (tonumber(p.t) or 0) < (tonumber(q.t) or 0) end)
-      save()
-      status = string.format("Marqueur %s créé à %.3f s.", name, best_t)
+    end
+    local newm = {t = best_t, name = "", color = 0}
+    a.markers[#a.markers + 1] = newm
+    table.sort(a.markers, function(p, q) return (tonumber(p.t) or 0) < (tonumber(q.t) or 0) end)
+    for k, m in ipairs(a.markers) do
+      if m == newm then X.marker_sel[a.id] = k; X.marker_focus = {id = a.id, idx = k}; break end
+    end
+    save()
+    status = string.format("Marqueur créé à %.3f s : saisis l'ID (ex. Q3) ou clique « Capturer cues ».", best_t)
+  end
+  reaper.ImGui_SameLine(ctx)
+  local msel = X.marker_sel[a.id]
+  if msel and not a.markers[msel] then msel = nil; X.marker_sel[a.id] = nil end
+  -- Sans champ cliqué : on vise le dernier marqueur au nom vide (celui qu'on vient de créer).
+  local mtarget = msel
+  if not mtarget then
+    for k = #a.markers, 1, -1 do
+      if tostring(a.markers[k].name or "") == "" then mtarget = k; break end
     end
   end
+  -- Marqueurs : toute action sélectionnée par son titre (tous types).
+  local _, npicked = X.picked_any_names()
+  -- Le libellé montre l'état réel : nombre d'actions sélectionnées (par titre) et marqueur visé.
+  -- "###" : l'ID du bouton reste stable même quand le texte change.
+  local cap_label = string.format("Capturer cues (%d) → %s###mk_capture", npicked,
+    mtarget and ("marqueur " .. mtarget) or "aucun marqueur")
+  if reaper.ImGui_Button(ctx, cap_label) then
+    local names, n = X.picked_any_names()
+    if not mtarget then
+      status = "Crée un marqueur (Ajouter marqueur) ou clique dans le champ du marqueur à renseigner."
+    elseif n == 0 then
+      status = "Aucune action sélectionnée : clique d'abord le TITRE d'une ligne dans la liste (Ctrl/Maj pour plusieurs)."
+    else
+      a.markers[mtarget].name = names -- remplace le contenu existant
+      X.marker_sel[a.id] = mtarget
+      X.cap_n[a.id] = X.cap_n[a.id] + 1 -- force le champ de texte à se rafraîchir
+      X.refresh_item_markers(a)
+      save()
+      status = n .. " action(s) capturée(s) dans le marqueur " .. mtarget .. " : " .. names
+    end
+  end
+  if reaper.ImGui_IsItemHovered(ctx) then
+    reaper.ImGui_SetTooltip(ctx, "Remplace le contenu du marqueur visé (►) par les actions sélectionnées par leur titre (tous types : CUE, OSC, MIDI…).\nLe nombre entre parenthèses = lignes actuellement sélectionnées dans la liste.")
+  end
+  reaper.ImGui_SameLine(ctx)
+  if reaper.ImGui_Button(ctx, "Supprimer##mk_delete") then
+    if msel then X.delete_marker = {id = a.id, idx = msel}
+    else status = "Clique d'abord dans le champ du marqueur à supprimer." end
+  end
+  if reaper.ImGui_IsItemHovered(ctx) then
+    reaper.ImGui_SetTooltip(ctx, "Supprime le marqueur sélectionné (►). Raccourci : Ctrl/Cmd+Suppr dans son champ.")
+  end
+  local sel_names = X.picked_any_names()
+  reaper.ImGui_TextDisabled(ctx, "Sélection : " .. (sel_names ~= "" and sel_names or "(aucune)")
+    .. "   |   Marqueur visé : " .. (mtarget and tostring(mtarget) or "—"))
   reaper.ImGui_TextDisabled(ctx, "Molette: naviguer | Ctrl+Molette: zoomer | Ctrl+clic marqueur: supprimer")
 
   reaper.ImGui_SetNextItemWidth(ctx, S(90))
@@ -3188,19 +3475,36 @@ local function draw_wave_editor(a)
   reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0+cw, yb0, 0x24382CFF)
   reaper.ImGui_DrawList_AddRectFilled(dl, x0, yb0, x0+cw, yb1, 0x202020FF)
 
-  local idx_start = math.max(1, math.floor((view_x / L) * w.n))
-  local idx_end = math.min(w.n, math.floor((view_end / L) * w.n))
-  local idx_span = math.max(1, idx_end - idx_start)
-  
+  -- Peaks adaptés à la fenêtre visible : au zoom, on rééchantillonne la zone affichée.
+  local px_count = math.max(1, math.floor(cw))
+  local view_peaks = get_wave_view(a.file, view_x, view_end, px_count)
   local mid = yb0 + hw/2
-  for px = 0, math.floor(cw)-1 do
-    local idx = idx_start + math.floor((px / cw) * idx_span)
-    local mxv, mnv = w.max[idx], w.min[idx]
-    if mxv then
-      local ya = mid - mxv * hw/2
-      local yb = mid - mnv * hw/2
-      if yb - ya < 1 then yb = ya + 1 end
-      reaper.ImGui_DrawList_AddLine(dl, x0+px, ya, x0+px, yb, 0x4F7FA8FF)
+  if view_peaks and view_peaks.n and view_peaks.n > 0 then
+    for px = 0, px_count - 1 do
+      local idx = 1 + math.floor((px / px_count) * (view_peaks.n - 1) + 0.5)
+      if idx < 1 then idx = 1 elseif idx > view_peaks.n then idx = view_peaks.n end
+      local mxv, mnv = view_peaks.max[idx], view_peaks.min[idx]
+      if mxv then
+        local ya = mid - mxv * hw/2
+        local yb = mid - mnv * hw/2
+        if yb - ya < 1 then yb = ya + 1 end
+        reaper.ImGui_DrawList_AddLine(dl, x0+px, ya, x0+px, yb, 0x4F7FA8FF)
+      end
+    end
+  else
+    -- Repli sur le cache global si l'échantillonage local échoue.
+    local idx_start = math.max(1, math.floor((view_x / L) * w.n))
+    local idx_end = math.min(w.n, math.floor((view_end / L) * w.n))
+    local idx_span = math.max(1, idx_end - idx_start)
+    for px = 0, px_count - 1 do
+      local idx = idx_start + math.floor((px / px_count) * idx_span)
+      local mxv, mnv = w.max[idx], w.min[idx]
+      if mxv then
+        local ya = mid - mxv * hw/2
+        local yb = mid - mnv * hw/2
+        if yb - ya < 1 then yb = ya + 1 end
+        reaper.ImGui_DrawList_AddLine(dl, x0+px, ya, x0+px, yb, 0x4F7FA8FF)
+      end
     end
   end
 
@@ -3271,8 +3575,12 @@ local function draw_wave_editor(a)
   end
 
   yend = yb1
-  if play_t then
-    reaper.ImGui_DrawList_AddLine(dl, tx(play_t), y0, tx(play_t), yend, 0xFFFFFFFF, 2)
+  -- Curseur de lecture : uniquement dans la fenêtre visible, borné au rectangle waveform.
+  if play_t and play_t >= view_x - 1e-9 and play_t <= view_end + 1e-9 then
+    local px = tx(play_t)
+    if px >= x0 - 1 and px <= x0 + cw + 1 then
+      reaper.ImGui_DrawList_AddLine(dl, px, y0, px, yend, 0xFFFFFFFF, 2)
+    end
   end
 
   local marker_boxes, lane_right = {}, {-math.huge, -math.huge, -math.huge}
@@ -3361,25 +3669,34 @@ local function draw_wave_editor(a)
 
   if area_hover then
     local wheel = reaper.ImGui_GetMouseWheel(ctx)
-    if wheel ~= 0 then
-      local is_ctrl = false
-      if reaper.ImGui_GetKeyMods and reaper.ImGui_Mod_Ctrl then
-        is_ctrl = (reaper.ImGui_GetKeyMods(ctx) & reaper.ImGui_Mod_Ctrl()) ~= 0
-      else
-        is_ctrl = reaper.ImGui_IsKeyDown(ctx, reaper.ImGui_Key_LeftCtrl()) or reaper.ImGui_IsKeyDown(ctx, reaper.ImGui_Key_RightCtrl())
-      end
-      
-      local mouse_t = xt(mx)
-      if is_ctrl then
-        local old_zoom = a.view_zoom
-        a.view_zoom = math.max(1.0, math.min(50.0, old_zoom * (1 + wheel * 0.1)))
-        local new_view_w = L / a.view_zoom
-        local ratio = (mouse_t - view_x) / view_w
-        a.view_offset = mouse_t - ratio * new_view_w
-      else
-        a.view_offset = a.view_offset - wheel * (view_w * 0.05)
-      end
-      
+    local wheel_h = 0
+    if reaper.ImGui_GetMouseWheelH then
+      wheel_h = reaper.ImGui_GetMouseWheelH(ctx) or 0
+    end
+    local is_ctrl = false
+    if reaper.ImGui_GetKeyMods and reaper.ImGui_Mod_Ctrl then
+      is_ctrl = (reaper.ImGui_GetKeyMods(ctx) & reaper.ImGui_Mod_Ctrl()) ~= 0
+    else
+      is_ctrl = reaper.ImGui_IsKeyDown(ctx, reaper.ImGui_Key_LeftCtrl())
+          or reaper.ImGui_IsKeyDown(ctx, reaper.ImGui_Key_RightCtrl())
+    end
+    local mouse_t = xt(mx)
+    local view_changed = false
+    -- Ctrl + molette verticale : zoom centré sous le curseur.
+    if wheel ~= 0 and is_ctrl then
+      local old_zoom = a.view_zoom
+      a.view_zoom = math.max(1.0, math.min(80.0, old_zoom * (1 + wheel * 0.12)))
+      local new_view_w = L / a.view_zoom
+      local ratio = (mouse_t - view_x) / math.max(1e-9, view_w)
+      a.view_offset = mouse_t - ratio * new_view_w
+      view_changed = true
+    end
+    -- Molette horizontale : défilement gauche/droite (plus de Shift+molette verticale).
+    if wheel_h ~= 0 then
+      a.view_offset = a.view_offset + wheel_h * (view_w * 0.08)
+      view_changed = true
+    end
+    if view_changed then
       a.view_offset = math.max(0, math.min(L - (L / a.view_zoom), a.view_offset))
       view_w = L / a.view_zoom
       view_x = a.view_offset
@@ -3432,16 +3749,53 @@ local function draw_wave_editor(a)
         or reaper.ImGui_IsKeyDown(ctx, reaper.ImGui_Key_RightCtrl())
     end
 
-    if in_wave_body and clicked_left and not alt and not ctrl then
-      -- Clic normal = seek source, même si la courbe de volume passe sous le pointeur.
+    if in_wave_body and clicked_left and ctrl and not alt then
+      -- Ctrl + clic-glisser : naviguer (pan) dans la waveform zoomée.
+      X.view_drag = {
+        id = a.id,
+        mx0 = mx,
+        off0 = a.view_offset or 0,
+        view_w = view_w,
+        cw = cw
+      }
+      cv_drag, marker_drag, wf_drag = nil, nil, nil
+      status = "Ctrl + glisser : navigation dans la forme d'onde."
+    elseif in_wave_body and clicked_left and not alt and not ctrl then
+      -- Clic normal = seek source, calé sur l'item de la cue sous la playhead (gère les boucles).
       local source_t = math.max(a.inpt, math.min(a.outpt, xt(mx)))
       local run = runs[a.id]
       if run and is_playing() then
         local speed = math.max(0.01, run.speed or tonumber(a.wave_speed) or 1)
-        local project_t = (tonumber(run.t0) or now_pos())
-          + (source_t - (tonumber(run.tin) or tonumber(a.inpt) or 0)) / speed
+        local project_t
+        local dest = find_track(run.dest_guid)
+        local pnow = now_pos()
+        if dest then
+          for i = reaper.CountTrackMediaItems(dest) - 1, 0, -1 do
+            local it = reaper.GetTrackMediaItem(dest, i)
+            local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+            local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
+            if pos <= pnow and pos + len > pnow then
+              local _, cid = reaper.GetSetMediaItemInfo_String(it, "P_EXT:cuelist_id", "", false)
+              if cid == tostring(run.id) then
+                local tk = reaper.GetActiveTake(it)
+                if tk and not reaper.TakeIsMIDI(tk) then
+                  local so = reaper.GetMediaItemTakeInfo_Value(tk, "D_STARTOFFS")
+                  local rate = reaper.GetMediaItemTakeInfo_Value(tk, "D_PLAYRATE")
+                  rate = (rate and rate > 0) and rate or speed
+                  project_t = pos + (source_t - so) / rate
+                  break
+                end
+              end
+            end
+          end
+        end
+        if not project_t then
+          project_t = (tonumber(run.t0) or pnow)
+            + (source_t - (tonumber(run.tin) or tonumber(a.inpt) or 0)) / speed
+        end
+        -- seekplay=true : déplace la tête de lecture en cours sans redémarrer le transport.
         reaper.SetEditCurPos2(PROJ, project_t, false, true)
-        status = string.format("Lecture déplacée à %.3f s.", source_t)
+        status = string.format("Lecture déplacée à %.3f s (source).", source_t)
       else
         status = "Clic : la cue doit être en lecture pour déplacer sa tête de lecture."
       end
@@ -3450,6 +3804,8 @@ local function draw_wave_editor(a)
       if clicked_right or ctrl then
         local removed = table.remove(a.markers, marker_hit)
         marker_drag, cv_drag = nil, nil
+        X.marker_sel[a.id] = nil
+        X.refresh_item_markers(a)
         save()
         status = "Marqueur " .. tostring(removed and removed.name or "") .. " supprimé."
       elseif clicked_left then
@@ -3457,16 +3813,9 @@ local function draw_wave_editor(a)
         cv_drag = nil
         status = "Déplacement du marqueur " .. tostring(a.markers[marker_hit].name or "") .. "."
       end
-    elseif in_wave_body and (alt or clicked_right or ctrl) then
+    elseif in_wave_body and (alt or clicked_right) then
       if clicked_right then
         if curve_hit then table.remove(env, curve_hit); save() end
-      elseif ctrl then
-        cv_drag, marker_drag = nil, nil
-        if curve_hit then
-          table.remove(env, curve_hit)
-          save()
-          status = "Point de courbe supprimé."
-        end
       elseif clicked_left and alt then
         marker_drag = nil
         local hit = curve_hit
@@ -3481,6 +3830,24 @@ local function draw_wave_editor(a)
     end
   end
 
+  -- Pan waveform : Ctrl + glisser horizontalement.
+  if X.view_drag then
+    if X.view_drag.id ~= a.id then
+      X.view_drag = nil
+    elseif reaper.ImGui_IsMouseDown(ctx, C_LEFT) then
+      local dx = mx - X.view_drag.mx0
+      local vw = X.view_drag.view_w or view_w
+      local cww = math.max(1, X.view_drag.cw or cw)
+      a.view_offset = (X.view_drag.off0 or 0) - (dx / cww) * vw
+      a.view_offset = math.max(0, math.min(L - (L / (a.view_zoom or 1)), a.view_offset))
+      view_w = L / a.view_zoom
+      view_x = a.view_offset
+      view_end = view_x + view_w
+    else
+      X.view_drag = nil
+    end
+  end
+
   mx, my = reaper.ImGui_GetMousePos(ctx)
   if marker_drag then
     if marker_drag.id ~= a.id then
@@ -3491,6 +3858,8 @@ local function draw_wave_editor(a)
     else
       marker_drag = nil
       table.sort(a.markers, function(p, q) return (tonumber(p.t) or 0) < (tonumber(q.t) or 0) end)
+      X.marker_sel[a.id] = nil
+      X.refresh_item_markers(a)
       save()
       status = "Position des marqueurs enregistrée."
     end
@@ -3554,26 +3923,57 @@ local function draw_wave_editor(a)
     reaper.ImGui_TextDisabled(ctx, "Aucun marqueur.")
   else
     local remove_marker, markers_changed = nil, false
+    if X.delete_marker and X.delete_marker.id == a.id then
+      remove_marker = X.delete_marker.idx
+      X.delete_marker = nil
+    end
+    local shortcut_mod = reaper.ImGui_GetKeyMods and reaper.ImGui_Mod_Shortcut
+      and (reaper.ImGui_GetKeyMods(ctx) & reaper.ImGui_Mod_Shortcut()) ~= 0
+      or (reaper.ImGui_IsKeyDown(ctx, reaper.ImGui_Key_LeftCtrl()) or reaper.ImGui_IsKeyDown(ctx, reaper.ImGui_Key_RightCtrl()))
     for i, marker in ipairs(a.markers) do
       reaper.ImGui_PushID(ctx, 50000 + i)
+      -- ► = marqueur ciblé par « Capturer cues » / « Supprimer »
+      reaper.ImGui_Text(ctx, X.marker_sel[a.id] == i and "►" or " ")
+      reaper.ImGui_SameLine(ctx)
       reaper.ImGui_SetNextItemWidth(ctx, S(80))
       local ct, mt = reaper.ImGui_InputDouble(ctx, "Temps##marktime", tonumber(marker.t) or 0, 0, 0, "%.3f")
       if ct then marker.t = math.max(0, math.min(L, mt)); markers_changed = true end
       reaper.ImGui_SameLine(ctx)
-      reaper.ImGui_SetNextItemWidth(ctx, S(145))
-      local cn, mn = reaper.ImGui_InputText(ctx, "Nom##markname", tostring(marker.name or "Marker"))
+      reaper.ImGui_SetNextItemWidth(ctx, S(220))
+      if X.marker_focus and X.marker_focus.id == a.id and X.marker_focus.idx == i then
+        reaper.ImGui_SetKeyboardFocusHere(ctx) -- curseur directement dans le champ vide créé
+        X.marker_focus = nil
+      end
+      local cn, mn = reaper.ImGui_InputText(ctx, "ID##markname" .. (X.cap_n[a.id] or 0), tostring(marker.name or ""))
       if cn then marker.name = mn; markers_changed = true end
-      reaper.ImGui_SameLine(ctx)
-      if reaper.ImGui_SmallButton(ctx, "Supprimer##markdelete") then remove_marker = i end
+      if reaper.ImGui_IsItemActive(ctx) or reaper.ImGui_IsItemClicked(ctx) then
+        X.marker_sel[a.id] = i
+        -- Ctrl/Cmd+Suppr avec le curseur dans le champ : supprime ce marqueur.
+        if shortcut_mod and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Delete(), false) then
+          remove_marker = i
+        end
+      end
       reaper.ImGui_PopID(ctx)
     end
-    if remove_marker then
+    if remove_marker and a.markers[remove_marker] then
       table.remove(a.markers, remove_marker)
+      X.marker_sel[a.id] = nil
       markers_changed = true
       status = "Marqueur supprimé de la cue."
     end
     if markers_changed then
-      table.sort(a.markers, function(p, q) return (tonumber(p.t) or 0) < (tonumber(q.t) or 0) end)
+      -- Le tri n'est fait que si l'ordre temporel est rompu : trier à chaque frappe
+      -- ferait sauter le champ en cours de saisie.
+      local sorted = true
+      for k = 2, #a.markers do
+        if (tonumber(a.markers[k-1].t) or 0) > (tonumber(a.markers[k].t) or 0) then sorted = false; break end
+      end
+      if not sorted then
+        local cur = X.marker_sel[a.id] and a.markers[X.marker_sel[a.id]] or nil
+        table.sort(a.markers, function(p, q) return (tonumber(p.t) or 0) < (tonumber(q.t) or 0) end)
+        if cur then for k, m in ipairs(a.markers) do if m == cur then X.marker_sel[a.id] = k; break end end end
+      end
+      X.refresh_item_markers(a)
       save()
     end
   end
@@ -3740,6 +4140,10 @@ local function draw_editor(a, i)
 
         local c4, fi = reaper.ImGui_InputDouble(ctx, "Fade in (s)", a.fadein or 0)
         if c4 then a.fadein = math.max(0, fi); save() end
+        reaper.ImGui_SetNextItemWidth(ctx, S(220))
+        local cfc, fc = reaper.ImGui_SliderDouble(ctx, "Courbe du fade##cue_curve", tonumber(a.fade_curve) or 0, 0, 1, "Léger  %.2f  Prononcé")
+        if cfc then a.fade_curve = math.max(0, math.min(1, fc)); save() end
+        reaper.ImGui_TextDisabled(ctx, "0 = linéaire ; augmentez le curseur pour accentuer la courbe des fades de cette cue.")
 
         reaper.ImGui_Separator(ctx)
         local ca, auto_value = reaper.ImGui_Checkbox(ctx, "AUTO : délai depuis le déclenchement", a.auto == true)
@@ -3774,8 +4178,9 @@ local function draw_editor(a, i)
     if reaper.ImGui_BeginTabBar(ctx, "acttabs_" .. a.type) then
       if reaper.ImGui_BeginTabItem(ctx, "Réglages") then
         if a.type == "stop" then
-          local c2, d = reaper.ImGui_InputDouble(ctx, "Durée du fade (s)", a.dur or 1)
-          if c2 then a.dur = math.max(0.05, d); save() end
+          local c2, d = reaper.ImGui_InputDouble(ctx, "Durée du fade (s)", a.dur or 0)
+          if c2 then a.dur = math.max(0, d); save() end
+          reaper.ImGui_TextDisabled(ctx, "0 = arrêt immédiat (affiché STOP) ; > 0 = FADEOUT.")
         elseif a.type == "pause" then
           local cu, un = reaper.ImGui_Checkbox(ctx, "Unpause (reprendre les cues en pause)##unpause", a.unpause == true)
           if cu then a.unpause = un; save() end
@@ -3889,6 +4294,13 @@ local function draw_prefs()
         .. "Décoché : les items restent sur la timeline.\n"
         .. "(L'arrêt de la lecture REAPER dépend de l'option « Arrêter la lecture… ».)")
     end
+    reaper.ImGui_SetNextItemWidth(ctx, S(220))
+    local ccurve, curve = reaper.ImGui_SliderDouble(ctx, "Courbe du STOP global##stop_curve", stop_curve, 0, 1, "Logarithmique  %.2f  Exponentiel")
+    if ccurve then
+      stop_curve = math.max(0, math.min(1, curve))
+      reaper.SetExtState(EXT, "stopcurve", tostring(stop_curve), true)
+    end
+    reaper.ImGui_TextDisabled(ctx, "À gauche : baisse rapide du niveau. Au centre : linéaire. À droite : niveau maintenu puis chute en fin de fade. La durée reste inchangée.")
     local c8, v8 = reaper.ImGui_Checkbox(ctx, "Une nouvelle cue remplace celle qui joue déjà sur la même piste", prefs.exclusive_track ~= false)
     if c8 then prefs.exclusive_track = v8; save() end
 
@@ -3956,6 +4368,9 @@ end
 
 ---------------------------------------------------------------- Draw principal
 local function draw()
+  if tabs and tabs[active_tab] and actions and tabs[active_tab].actions ~= actions then
+    tabs[active_tab].actions = actions -- filet de sécurité : jamais de liste d'onglet périmée
+  end
   -- Raccourcis clavier traités au début de la frame, avant que les widgets
   -- (boutons, champs de saisie, etc.) ne consomment les événements clavier.
   local focused = false
@@ -3981,6 +4396,9 @@ local function draw()
       copy_picked_actions(true)
     elseif shortcut_down and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_V(), false) then
       paste_picked_actions()
+    elseif shortcut_down and (reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Delete(), false)
+        or reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Backspace(), false)) then
+      X.delete_picked()
     elseif shortcut_down and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Z(), false) then
       undo_change()
     elseif shortcut_down and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Y(), false) then
@@ -4012,6 +4430,7 @@ local function draw()
     if i > 1 then reaper.ImGui_SameLine(ctx) end
     local label = (i == active_tab and "[ " or "") .. (tab.name or ("Liste "..i)) .. (i == active_tab and " ]" or "") .. "##cue_list_tab_"..i
     if reaper.ImGui_Button(ctx, label) and i ~= active_tab then
+      if tabs[active_tab] then tabs[active_tab].actions = actions end
       active_tab = i; sync_active_tab()
       pick_anchor = nil
       status = "Liste active : " .. (tabs[i].name or ("Liste "..i))
@@ -4103,12 +4522,15 @@ local function draw()
 
   local GREEN_GO = 0x2E8B57FF
   local WHITE_GO = 0xFFFFFFFF
+  -- Contour gris, de l'épaisseur des lignes de l'interface (2 px).
+  reaper.ImGui_PushStyleVar(ctx, reaper.ImGui_StyleVar_FrameBorderSize(), S(2))
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Border(), 0x8C8C8CFF)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), GREEN_GO)
   if reaper.ImGui_Col_ButtonHovered then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonHovered(), GREEN_GO) end
   if reaper.ImGui_Col_ButtonActive then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ButtonActive(), GREEN_GO) end
 
   local go_pressed = false
-  local go_w, go_h = S(100), S(80)
+  local go_w, go_h = S(110), S(80)
   local can_draw = reaper.ImGui_GetWindowDrawList
     and reaper.ImGui_GetItemRectMin and reaper.ImGui_GetItemRectMax
   local can_draw_text = can_draw and reaper.ImGui_DrawList_AddTextEx
@@ -4167,10 +4589,11 @@ local function draw()
     elseif reaper.ImGui_SetWindowFontScale then reaper.ImGui_SetWindowFontScale(ctx, ui_scale) end
   end
 
-  local go_pop_count = 1
+  local go_pop_count = 2 -- Border + Button
   if reaper.ImGui_Col_ButtonHovered then go_pop_count = go_pop_count + 1 end
   if reaper.ImGui_Col_ButtonActive then go_pop_count = go_pop_count + 1 end
   reaper.ImGui_PopStyleColor(ctx, go_pop_count)
+  reaper.ImGui_PopStyleVar(ctx, 1)
   if go_pressed then go_selected() end
   reaper.ImGui_SameLine(ctx)
   reaper.ImGui_Text(ctx, "Prochaine : "..sel_name)
@@ -4199,7 +4622,7 @@ local function draw()
   reaper.ImGui_SetNextItemWidth(ctx, S(80))
   local cf, sf = reaper.ImGui_InputDouble(ctx, "Fade stop (s)", stop_fade)
   if cf then
-    stop_fade = math.max(0.05, sf)
+    stop_fade = math.max(0, sf)
     reaper.SetExtState(EXT, "stopfade", tostring(stop_fade), true)
   end
 
@@ -4230,7 +4653,9 @@ local function draw()
             if type(d.tabs) == "table" and #d.tabs > 0 then
               tabs = d.tabs
               for _, tab in ipairs(tabs) do tab.name = tab.name or "Liste"; tab.actions = tab.actions or {} end
-              active_tab = d.active_tab or 1; sync_active_tab()
+              active_tab = d.active_tab or 1
+              if type(d.actions) == "table" and tabs[active_tab] then tabs[active_tab].actions = d.actions end
+              sync_active_tab()
             else
               actions = d.actions or {}; tabs = {{name = "Liste 1", actions = actions}}; active_tab = 1; sync_active_tab()
             end
@@ -4326,7 +4751,11 @@ local function draw()
   reaper.ImGui_Separator(ctx)
   
   local _, avail_h = reaper.ImGui_GetContentRegionAvail(ctx)
-  local list_h = math.max(S(120), avail_h - (lower_h_override or lower_h) - S(8))
+  local win_h_now = select(2, reaper.ImGui_GetWindowSize(ctx))
+  -- Panneau de paramètres : moitié de la fenêtre par défaut (ajustable avec la poignée ⋮⋮),
+  -- réduit quand aucune action n'est affichée ou que l'en-tête est replié.
+  local lower_total = X.ed_open and (lower_h_override or math.floor(win_h_now * 0.5)) or S(70)
+  local list_h = math.max(S(120), avail_h - lower_total - S(8))
 
   local table_flags = reaper.ImGui_TableFlags_RowBg() |
                       reaper.ImGui_TableFlags_BordersInnerV() |
@@ -4339,12 +4768,12 @@ local function draw()
 
     reaper.ImGui_TableSetupColumn(ctx, "N°", reaper.ImGui_TableColumnFlags_WidthFixed(), S(34))
     reaper.ImGui_TableSetupColumn(ctx, "Titre", reaper.ImGui_TableColumnFlags_WidthStretch())
-    reaper.ImGui_TableSetupColumn(ctx, "Type", reaper.ImGui_TableColumnFlags_WidthFixed(), S(68))
+    reaper.ImGui_TableSetupColumn(ctx, "Type", reaper.ImGui_TableColumnFlags_WidthFixed(), S(78))
     reaper.ImGui_TableSetupColumn(ctx, "Statut", reaper.ImGui_TableColumnFlags_WidthFixed(), S(104))
     reaper.ImGui_TableSetupColumn(ctx, "AUTO", reaper.ImGui_TableColumnFlags_WidthFixed(), S(48))
     reaper.ImGui_TableSetupColumn(ctx, "FOLLOW", reaper.ImGui_TableColumnFlags_WidthFixed(), S(58))
     reaper.ImGui_TableSetupColumn(ctx, "DELAY (s)", reaper.ImGui_TableColumnFlags_WidthFixed(), S(86))
-    reaper.ImGui_TableSetupColumn(ctx, "Output", reaper.ImGui_TableColumnFlags_WidthFixed(), S(130))
+    reaper.ImGui_TableSetupColumn(ctx, "Output", reaper.ImGui_TableColumnFlags_WidthFixed(), S(170))
     reaper.ImGui_TableSetupColumn(ctx, "ID", reaper.ImGui_TableColumnFlags_WidthFixed(), S(54))
 
     reaper.ImGui_TableNextRow(ctx, reaper.ImGui_TableRowFlags_Headers())
@@ -4470,23 +4899,49 @@ local function draw()
           local verb = a.type == "devamp" and "devamp" or (a.unpause == true and "unpause" or "pause")
           if #names > 0 then title_text = verb .. " " .. table.concat(names, ", ") end
         end
-        if reaper.ImGui_Selectable(ctx, title_text .. "##nm", picked[a.id] or false) then
-          -- Le clic sur le titre ne change NI la cue préparée NI l'éditeur :
-          -- il ne gère que la sélection multiple (captures de cibles).
-          -- Sélection Windows : clic simple = remplacer, Ctrl = basculer,
-          -- Maj = étendre depuis l'ancre. Ne déclenche jamais la cue.
-          local shift, multi = mods_shift_multi()
-          if shift then
-            local anchor = pick_anchor
-            if not anchor or not actions[anchor] then anchor = i end
-            pick_range(anchor, i)
-          elseif multi then
-            if picked[a.id] then picked[a.id] = nil else picked[a.id] = true end
-            pick_anchor = i
-          else
-            -- La sélection du titre ne change pas la cue préparée (selected).
-            picked = {[a.id] = true}
-            pick_anchor = i
+        local renaming = X.rename and X.rename.id == a.id
+        if renaming then
+          -- Renommage en place : Entrée / clic ailleurs = valider, Échap = annuler.
+          if X.rename.focus then reaper.ImGui_SetKeyboardFocusHere(ctx); X.rename.focus = false end
+          reaper.ImGui_SetNextItemWidth(ctx, -1)
+          local rflags = reaper.ImGui_InputTextFlags_AutoSelectAll()
+          local _, rtxt = reaper.ImGui_InputText(ctx, "##rename" .. tostring(a.id), X.rename.buf, rflags)
+          X.rename.buf = rtxt
+          if reaper.ImGui_IsItemDeactivated(ctx) or reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Enter(), false)
+             or reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_KeypadEnter(), false) then
+            if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape(), false) then
+              status = "Renommage annulé."
+            else
+              local nm = tostring(X.rename.buf or ""):gsub("^%s+", ""):gsub("%s+$", "")
+              if nm ~= "" and nm ~= a.name then a.name = nm; save(); status = "Renommé : " .. nm end
+            end
+            X.rename = nil
+          end
+        else
+          if reaper.ImGui_Selectable(ctx, title_text .. "##nm", picked[a.id] or false) then
+            -- Le clic sur le titre ne change NI la cue préparée NI l'éditeur :
+            -- il ne gère que la sélection multiple (captures de cibles).
+            -- Sélection Windows : clic simple = remplacer, Ctrl = basculer,
+            -- Maj = étendre depuis l'ancre. Ne déclenche jamais la cue.
+            local shift, multi = mods_shift_multi()
+            if shift then
+              local anchor = pick_anchor
+              if not anchor or not actions[anchor] then anchor = i end
+              pick_range(anchor, i)
+            elseif multi then
+              if picked[a.id] then picked[a.id] = nil else picked[a.id] = true end
+              pick_anchor = i
+            else
+              -- La sélection du titre ne change pas la cue préparée (selected).
+              picked = {[a.id] = true}
+              pick_anchor = i
+            end
+          end
+          -- Double-clic sur le titre : renommer (les titres Stop/Pause/Devamp sont calculés
+          -- à partir de leurs cibles et ne sont donc pas renommables).
+          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_IsMouseDoubleClicked(ctx, 0)
+             and a.type ~= "stop" and a.type ~= "pause" and a.type ~= "devamp" then
+            X.rename = {id = a.id, buf = tostring(a.name or ""), focus = true}
           end
         end
         -- Déposer un fichier audio sur le titre crée une nouvelle cue juste après cette ligne.
@@ -4496,7 +4951,26 @@ local function draw()
         end
 
         reaper.ImGui_TableSetColumnIndex(ctx, 2)
-        reaper.ImGui_Text(ctx, TYPE_LABEL[a.type] or "?")
+        local type_label = TYPE_LABEL[a.type] or "?"
+        if a.type == "stop" and (tonumber(a.dur) or 0) > 0 then type_label = "FADEOUT" end
+        local lx, ly = reaper.ImGui_GetCursorScreenPos(ctx)
+        reaper.ImGui_Text(ctx, type_label)
+        if a.type == "osc" or a.type == "midi" then
+          local tw = reaper.ImGui_CalcTextSize(ctx, type_label)
+          local lh = reaper.ImGui_GetTextLineHeight(ctx)
+          local cx, cy = lx + tw + S(10), ly + lh * 0.5
+          local t_led = X.led[a.id]
+          local lit = t_led and (reaper.time_precise() - t_led) < 0.25
+          local ldl = reaper.ImGui_GetWindowDrawList(ctx)
+          local is_midi = a.type == "midi"
+          if lit then
+            reaper.ImGui_DrawList_AddCircleFilled(ldl, cx, cy, S(6), is_midi and 0x3DA5FF55 or 0xFF3B3B55)
+            reaper.ImGui_DrawList_AddCircleFilled(ldl, cx, cy, S(4), is_midi and 0x4DB3FFFF or 0xFF4A4AFF)
+          else
+            reaper.ImGui_DrawList_AddCircleFilled(ldl, cx, cy, S(4), is_midi and 0x14304DFF or 0x4A1616FF)
+          end
+          reaper.ImGui_DrawList_AddCircle(ldl, cx, cy, S(4), 0x00000099, 0, 1)
+        end
 
         reaper.ImGui_TableSetColumnIndex(ctx, 3)
         local st = a.type == "cue" and active_ids[tostring(a.id)] or nil
@@ -4567,6 +5041,22 @@ local function draw()
         end
 
         reaper.ImGui_TableSetColumnIndex(ctx, 7)
+        -- Menu déroulant de piste directement dans la liste (cues audio/région et MIDI).
+        local inplace_row = a.type == "cue" and a.src ~= "file" and a.projfn and a.projfn ~= "" and not a.copy
+        local row_has_track = (a.type == "cue" and not inplace_row) or a.type == "midi"
+        if row_has_track then
+          reaper.ImGui_SetNextItemWidth(ctx, -1)
+          local tc, tg = track_combo("##out_row_" .. tostring(a.id), a.track, a.type == "cue" and a.src ~= "file")
+          if tc then
+            a.track = tg
+            save()
+            local trn = tg and find_track(tg)
+            status = "Piste de Q" .. tostring(a.id) .. " : " .. (trn and track_name(trn) or "(piste d'origine)")
+          end
+          if reaper.ImGui_IsItemHovered(ctx) then
+            reaper.ImGui_SetTooltip(ctx, "Piste de destination de cette action.")
+          end
+        else
         local tr = find_track(a.track)
         local cible = tr and track_name(tr) or (a.type == "cue" and (a.src == "file" and "(choisir)" or "(origine)") or "-")
         if a.type == "preset" then
@@ -4581,6 +5071,7 @@ local function draw()
           cible = tr and track_name(tr) or "(piste)"
         end
         reaper.ImGui_Text(ctx, cible)
+        end
 
         reaper.ImGui_TableSetColumnIndex(ctx, 8)
         reaper.ImGui_Text(ctx, tostring(a.id or "?"))
@@ -4651,12 +5142,22 @@ local function draw()
 
   if sel_i then
     local open_ed = reaper.ImGui_CollapsingHeader(ctx, "Paramètres de l'action sélectionnée##edhdr", nil, reaper.ImGui_TreeNodeFlags_DefaultOpen())
-    if open_ed then draw_editor(actions[sel_i], sel_i) end
+    X.ed_open = open_ed and true or false
+    if open_ed then
+      -- Défilement vertical dédié aux paramètres (comme la liste du haut).
+      local win_h = select(2, reaper.ImGui_GetWindowSize(ctx))
+      local params_h = math.max(S(90), (lower_h_override or math.floor(win_h * 0.5)) - S(75))
+      if reaper.ImGui_BeginChild(ctx, "##params_scroll", 0, params_h) then
+        draw_editor(actions[sel_i], sel_i)
+        reaper.ImGui_EndChild(ctx)
+      end
+    end
+  else
+    X.ed_open = false
   end
 
   reaper.ImGui_Separator(ctx)
   reaper.ImGui_Text(ctx, status)
-  lower_h = reaper.ImGui_GetCursorPosY(ctx) - y_lower
 end
 
 ---------------------------------------------------------------- Boucle principale
