@@ -1,5 +1,5 @@
 -- @description Realive — système de cues pour REAPER
--- @version 1.3
+-- @version 1.4
 -- @author joffo78-hash
 -- @link https://github.com/joffo78-hash/Realive
 -- @about
@@ -168,6 +168,8 @@ local play_check, np_runs, last_run_tick = nil, nil, 0
 local LOOP_HORIZON = 6.0
 local active_ids, last_active_scan = {}, 0
 local stop_until = {}
+-- Horloge jusqu'à laquelle un fondu STOP est en cours (ne pas stopper le transport).
+local fade_hold_until = 0
 -- Enchaînement automatique : compte à rebours de la cue source vers la suivante.
 local auto_chain = nil
 local ext_runs = {}
@@ -339,6 +341,14 @@ end
 
 local function now_pos()
   return is_playing() and reaper.GetPlayPosition2Ex(PROJ) or reaper.GetCursorPositionEx(PROJ)
+end
+
+-- Timeline à jour ≠ audio à jour : REAPER précharge le média. Un seek play
+-- à la position courante force le moteur à reconstruire à partir des items actuels.
+local function resync_play_engine()
+  if not is_playing() then return end
+  local p = reaper.GetPlayPosition2Ex(PROJ)
+  reaper.SetEditCurPos2(PROJ, p, false, true)
 end
 
 local function track_name(tr)
@@ -514,9 +524,52 @@ local function kill_runs(ids)
     for _, r in pairs(runs) do r.alive = false end
     return
   end
-  for _, id in ipairs(ids) do
+  local function kill_one(id)
+    if id == nil then return end
     if runs[id] then runs[id].alive = false end
+    local s = tostring(id)
+    if runs[s] then runs[s].alive = false end
+    local n = tonumber(id)
+    if n ~= nil and runs[n] then runs[n].alive = false end
   end
+  if type(ids) == "table" and ids[1] == nil and next(ids) ~= nil then
+    -- set-like { [id]=true, ... }
+    for id in pairs(ids) do kill_one(id) end
+  else
+    for _, id in ipairs(ids) do kill_one(id) end
+  end
+end
+
+-- STOP + fade : les boucles restent vivantes jusqu'à fade_out_end (volume ↓).
+local function begin_run_fades(ids, t_start, t_end)
+  local function arm_one(id, r)
+    if not r or not r.alive then return end
+    if r.loop then
+      r.fade_out_start = t_start
+      r.fade_out_end = t_end
+      r.fade_base_vol = r.fade_base_vol or 1
+    else
+      r.alive = false
+    end
+  end
+  if not ids then
+    for id, r in pairs(runs) do arm_one(id, r) end
+    return
+  end
+  if type(ids) == "table" and ids[1] == nil and next(ids) ~= nil then
+    for id in pairs(ids) do
+      arm_one(id, runs[id] or runs[tostring(id)] or (tonumber(id) and runs[tonumber(id)]))
+    end
+  else
+    for _, id in ipairs(ids) do
+      arm_one(id, runs[id] or runs[tostring(id)] or (tonumber(id) and runs[tonumber(id)]))
+    end
+  end
+end
+
+local function is_loop_fading_id(id)
+  local r = runs[id] or runs[tostring(id)] or (tonumber(id) and runs[tonumber(id)])
+  return r and r.alive and r.loop and r.fade_out_end ~= nil
 end
 
 local function add_file_item(dest, file, pos, tin, seg, fadein, gain, id, markers)
@@ -604,6 +657,18 @@ local function refresh_active(now)
           if fading then set[id] = "fade"
           elseif set[id] ~= "fade" then set[id] = "run" end
         end
+      end
+    end
+  end
+  -- Source de vérité runtime : les runs (indispensable pour les boucles,
+  -- y compris pendant un STOP+fade où le volume descend sans D_FADEOUTLEN).
+  for id, r in pairs(runs) do
+    if r and r.alive then
+      local key = tostring(id)
+      if r.fade_out_end then
+        set[key] = "fade"
+      elseif not r.paused then
+        if set[key] ~= "fade" then set[key] = "run" end
       end
     end
   end
@@ -1072,8 +1137,47 @@ local function process_runs(now)
         runs[id] = nil
       end
       
+      -- STOP + fade sur boucle : rester en loop, baisser le volume, couper à la fin.
+      if runs[id] and r.fade_out_end and not r.paused then
+        local pnow = now_pos()
+        local t0 = tonumber(r.fade_out_start) or pnow
+        local t1 = tonumber(r.fade_out_end) or pnow
+        local prog = (pnow - t0) / math.max(1e-6, t1 - t0)
+        if prog >= 1 or pnow >= t1 then
+          local sid = tostring(id)
+          for ii = reaper.CountMediaItems(PROJ) - 1, 0, -1 do
+            local it = reaper.GetMediaItem(PROJ, ii)
+            local _, cid = reaper.GetSetMediaItemInfo_String(it, "P_EXT:cuelist_id", "", false)
+            if cid == sid then
+              reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(it), it)
+            end
+          end
+          remove_keepalive(id)
+          runs[id] = nil
+          devamp_flags[id] = nil
+          devamp_flags[tostring(id)] = nil
+        else
+          local g = 1 - math.max(0, math.min(1, prog))
+          g = g * g
+          local destf = find_track(r.dest_guid)
+          if destf then
+            local cue = actions_by_id[id] or actions_by_id[tostring(id)]
+            local db = cue and tonumber(cue.wave_gain_db) or 0
+            cue_audio_items(destf, id, function(it, tk)
+              local envg = 1
+              if r.env and #r.env > 0 then
+                local so = reaper.GetMediaItemTakeInfo_Value(tk, "D_STARTOFFS") or r.tin
+                envg = env_gain(r.env, so)
+              end
+              reaper.SetMediaItemTakeInfo_Value(tk, "D_VOL", envg * g * (10 ^ (db / 20)))
+              reaper.UpdateItemInProject(it)
+            end)
+          end
+        end
+      end
+
       -- Suivi dynamique de l'enveloppe sur les items actifs
-      if runs[id] and r.env and #r.env > 0 and dest and not r.paused then
+      if runs[id] and r.env and #r.env > 0 and dest and not r.paused and not r.fade_out_end then
         local pe = p + margin/1000
         local speed = math.max(0.01, r.speed or 1)
         for k = reaper.CountTrackMediaItems(dest)-1, 0, -1 do
@@ -1140,26 +1244,57 @@ local function create_track(name)
 end
 
 local function replace_on_tracks(tracks, id, target, fade)
-  -- `fade` = durée de fondu de l'ancienne cue (= fade-in de la nouvelle, comportement voulu).
-  -- Minimum anti-click si fade = 0 pour éviter un clic.
-  local t_end = target + math.max(ANTICLICK, tonumber(fade) or 0)
-  local sid, stopped = tostring(id), {}
-  for _, tr in pairs(tracks) do
-    for i = reaper.CountTrackMediaItems(tr)-1, 0, -1 do
-      local it = reaper.GetTrackMediaItem(tr, i)
-      local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
-      local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
-      if pos + len > target then
+  -- fade <= 0 : mute + suppression immédiate des autres cues sur la piste.
+  local sid = tostring(id)
+  fade = tonumber(fade) or 0
+  local hard = fade <= 0
+  local p = now_pos()
+  local t_cut = hard and p or target
+  local t_end = t_cut + math.max(ANTICLICK, fade)
+  local stopped = {}
+  local track_set = {}
+  for guid, tr in pairs(tracks) do
+    track_set[guid] = tr
+    if tr then track_set[reaper.GetTrackGUID(tr)] = tr end
+  end
+
+  -- Tuer les runs dont la destination est l'une de ces pistes.
+  for rid, r in pairs(runs) do
+    if r.alive and tostring(rid) ~= sid then
+      local match = r.dest_guid and track_set[r.dest_guid]
+      if match then
+        r.alive = false
+        stopped[#stopped + 1] = rid
+      end
+    end
+  end
+
+  for _, tr in pairs(track_set) do
+    if tr then
+      for i = reaper.CountTrackMediaItems(tr) - 1, 0, -1 do
+        local it = reaper.GetTrackMediaItem(tr, i)
         local _, mark = reaper.GetSetMediaItemInfo_String(it, "P_EXT:cuelist_id", "", false)
-        if mark ~= "" and mark ~= sid then
-          if pos >= target then
-            reaper.DeleteTrackMediaItem(tr, it)
-          else
-            local new_end = math.min(pos + len, t_end)
-            reaper.SetMediaItemInfo_Value(it, "D_LENGTH", new_end - pos)
-            reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN", new_end - target)
+        if mark ~= "" and tostring(mark) ~= sid then
+          local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+          local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
+          if pos + len > t_cut then
+            local tk = reaper.GetActiveTake(it)
+            if hard then
+              if tk and not reaper.TakeIsMIDI(tk) then
+                reaper.SetMediaItemTakeInfo_Value(tk, "D_VOL", 0)
+              end
+              reaper.SetMediaItemInfo_Value(it, "D_VOL", 0)
+              reaper.DeleteTrackMediaItem(tr, it)
+            elseif pos >= t_cut then
+              reaper.DeleteTrackMediaItem(tr, it)
+            else
+              local new_end = math.min(pos + len, t_end)
+              reaper.SetMediaItemInfo_Value(it, "D_LENGTH", math.max(0.001, new_end - pos))
+              reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN", math.max(0, new_end - t_cut))
+              reaper.UpdateItemInProject(it)
+            end
+            stopped[#stopped + 1] = tonumber(mark) or mark
           end
-          stopped[#stopped+1] = tonumber(mark)
         end
       end
     end
@@ -1272,31 +1407,44 @@ local function release_holds()
 end
 
 local function stop_previous(id, t_start, fade)
-  local t_end = t_start + math.max(0.005, fade or 0.03)
-  local latest = t_start
-  for i = reaper.CountMediaItems(PROJ)-1, 0, -1 do
+  -- Coupe les items de CET id. Retourne toujours t_start (placement de la nouvelle cue).
+  -- Ne jamais renvoyer now_pos() : poser sous la playhead fait démarrer le fichier en cours.
+  fade = tonumber(fade) or 0.03
+  local hard = fade <= ANTICLICK + 1e-6
+  local p = now_pos()
+  local t_cut = hard and p or t_start
+  local t_end = t_cut + math.max(ANTICLICK, fade)
+  local sid = tostring(id)
+  for i = reaper.CountMediaItems(PROJ) - 1, 0, -1 do
     local it = reaper.GetMediaItem(PROJ, i)
     local _, mark = reaper.GetSetMediaItemInfo_String(it, "P_EXT:cuelist_id", "", false)
-    local _, ka = reaper.GetSetMediaItemInfo_String(it, "P_EXT:cuelist_keepalive", "", false)
-    if mark == id and ka == "1" then
-      reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(it), it)
-    elseif mark == id then
+    if tostring(mark) == sid then
+      local _, ka = reaper.GetSetMediaItemInfo_String(it, "P_EXT:cuelist_keepalive", "", false)
       local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
       local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
-      if pos >= t_start then
+      local tk = reaper.GetActiveTake(it)
+      if ka == "1" or hard or pos >= t_cut then
+        if tk and not reaper.TakeIsMIDI(tk) then
+          reaper.SetMediaItemTakeInfo_Value(tk, "D_VOL", 0)
+        end
+        reaper.SetMediaItemInfo_Value(it, "D_VOL", 0)
         reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(it), it)
-      elseif pos + len > t_start then
+      elseif pos + len > t_cut then
         local new_end = math.min(pos + len, t_end)
-        reaper.SetMediaItemInfo_Value(it, "D_LENGTH", new_end - pos)
-        reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN", new_end - t_start)
-        if new_end > latest then latest = new_end end
+        reaper.SetMediaItemInfo_Value(it, "D_LENGTH", math.max(0.001, new_end - pos))
+        reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN", math.max(0, new_end - t_cut))
+        reaper.UpdateItemInProject(it)
       end
     end
   end
-  return latest
+  if runs[id] then runs[id].alive = false end
+  if runs[sid] then runs[sid].alive = false end
+  local n = tonumber(id)
+  if n and runs[n] then runs[n].alive = false end
+  return t_start
 end
 
-local function fire_cue(a)
+local function fire_cue(a, from_chain)
   release_holds()
   -- La boucle est gérée par la cue (Li/Lo) : on coupe le Repeat de REAPER pour
   -- éviter qu'il ne reboucle la lecture (conflit avec Devamp / suite jusqu'à OUT).
@@ -1343,12 +1491,18 @@ local function fire_cue(a)
   end
 
   local playing = is_playing()
-  -- Position cible initiale (recalée juste avant la création de l'item : si le
-  -- traitement a pris du temps, la playhead peut avoir dépassé ce point et la
-  -- nouvelle cue partirait alors au milieu du fichier).
-  local target = stop_previous(tostring(a.id), now_pos() + margin/1000, ANTICLICK)
+  local fadein = tonumber(a.fadein) or 0
+  -- Toujours placer DEVANT la playhead (sinon REAPER démarre le fichier en cours).
+  -- Enchaînement FOLLOW/AUTO : look minimal pour éviter un trou audible.
+  local exclusive_look
+  if from_chain then
+    exclusive_look = (fadein > 0) and math.max(0.02, math.min(0.08, fadein * 0.25)) or 0.01
+  else
+    exclusive_look = (fadein > 0) and math.max(margin / 1000, 0.05) or 0.04
+  end
+  local target = now_pos() + exclusive_look
+  stop_previous(tostring(a.id), target, fadein > 0 and fadein or ANTICLICK)
   runs[a.id] = nil
-  local fadein = a.fadein or 0
   local count, missing, found = 0, nil, 0
   local used, notes = {}, {}
 
@@ -1378,12 +1532,17 @@ local function fire_cue(a)
       local lo   = math.max(li + 0.01, math.min(tonumber(a.loop_out) or tout, tout))
       local env  = a.env
       use_track(dest, nch)
+      -- Couper les autres cues de cette piste AVANT de poser le nouvel item.
+      if prefs.exclusive_track ~= false then
+        replace_on_tracks(used, a.id, target, fadein)
+      end
       local speed = math.max(0.01, math.min(16, tonumber(a.wave_speed) or 1))
-      -- Recaler la position si la playhead a avancé pendant la préparation.
+      -- Recaler si la playhead a avancé pendant la préparation (toujours devant).
       do
-        local now_t = now_pos() + margin/1000
+        local now_t = now_pos() + exclusive_look
         if now_t > target then
-          target = stop_previous(tostring(a.id), now_t, ANTICLICK)
+          target = now_t
+          stop_previous(tostring(a.id), target, fadein > 0 and fadein or ANTICLICK)
         end
       end
       -- Départ toujours depuis IN. Si boucle : premier segment IN→LO, puis cycles LI→LO.
@@ -1519,7 +1678,12 @@ local function fire_cue(a)
                        or string.format("Cue \"%s\" : aucun item exploitable.", a.name))
     return
   end
-  if not playing then play_main() end
+  if not playing then
+    play_main()
+  elseif prefs.exclusive_track ~= false then
+    -- Timeline déjà correcte : forcer le moteur audio à la relire.
+    resync_play_engine()
+  end
   cue_session = true
 
   local pre = ""
@@ -1577,9 +1741,48 @@ delete_all_cuelist_items = function()
   return delete_cuelist_items(nil)
 end
 
+-- Applique un fade-out natif sur la durée restante de l'item (sans le prolonger ni le boucler).
+-- Si l'item est plus court que le fade demandé : tant pis, on fond sur ce qui reste.
+-- On n'interrompt JAMAIS un item dont le fade est déjà en cours.
+local function apply_item_fadeout(it, t_start, t_end, fshape, allow_loop)
+  local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+  local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
+  local finish = pos + len
+  if finish <= t_start then return false end
+  if pos >= t_start then
+    return "future" -- pas encore démarré
+  end
+  -- Ne pas raccourcir un item qui a déjà un fade-out en cours plus long.
+  local existing_fo = reaper.GetMediaItemInfo_Value(it, "D_FADEOUTLEN") or 0
+  if existing_fo > 0.02 then
+    local fade_start = finish - existing_fo
+    if t_start >= fade_start - 1e-4 then
+      -- Déjà en train de fader : ne pas toucher.
+      return true
+    end
+  end
+  -- Couper au plus tôt à t_end, sans jamais dépasser la fin actuelle de l'item.
+  local new_end = math.min(finish, t_end)
+  if new_end <= pos + 0.005 then new_end = pos + 0.005 end
+  local fo = math.max(0.005, new_end - t_start)
+  -- fo ne peut pas dépasser la longueur restante de l'item après t_start
+  fo = math.min(fo, new_end - pos)
+  reaper.SetMediaItemInfo_Value(it, "D_LENGTH", math.max(0.005, new_end - pos))
+  reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN", fo)
+  if fshape ~= nil then
+    reaper.SetMediaItemInfo_Value(it, "D_FADEOUTSHAPE", fshape)
+  end
+  reaper.UpdateItemInProject(it)
+  return true
+end
+
+local function arm_fade_hold(dur)
+  local hold = reaper.time_precise() + math.max(0.05, tonumber(dur) or 0) + 0.15
+  if hold > fade_hold_until then fade_hold_until = hold end
+end
+
 local function stop_all(dur)
   dur = dur or stop_fade
-  kill_runs(nil)
   stop_ext(nil, dur)
   local p = now_pos()
   local seen, n = {}, 0
@@ -1606,6 +1809,7 @@ local function stop_all(dur)
   -- À durée 0, on ne planifie aucun fondu logiciel : on termine les items
   -- au curseur avec seulement 3 ms de fade anti-clic.
   if dur <= 0 then
+    kill_runs(nil)
     local cutoff = p + ANTICLICK
     for i = reaper.CountMediaItems(PROJ)-1, 0, -1 do
       local it = reaper.GetMediaItem(PROJ, i)
@@ -1634,6 +1838,7 @@ local function stop_all(dur)
       end
     end
     reaper.UpdateArrange()
+    resync_play_engine()
     status = "STOP : immédiat (protection anti-clic 3 ms)."
     return
   end
@@ -1654,29 +1859,29 @@ local function stop_all(dur)
   elseif stop_curve < 0.95 then fshape = 2
   else fshape = 4 end
   local keep_mode = prefs.delete_on_stop ~= true
+  arm_fade_hold(dur)
+  begin_run_fades(nil, t_start, t_end)
   for i = reaper.CountMediaItems(PROJ)-1, 0, -1 do
     local it = reaper.GetMediaItem(PROJ, i)
     local _, mark = reaper.GetSetMediaItemInfo_String(it, "P_EXT:cuelist", "", false)
     if mark == "1" then
-      local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
-      local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
-      local finish = pos + len
-      if finish > t_start then
+      local _, cid = reaper.GetSetMediaItemInfo_String(it, "P_EXT:cuelist_id", "", false)
+      if is_loop_fading_id(cid) then
         n = n + 1
-        if pos >= t_start then
-          -- Pas encore démarré : supprimé, ou rendu muet si on conserve les items.
-          if keep_mode then
-            reaper.SetMediaItemInfo_Value(it, "B_MUTE", 1)
-          else
-            reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(it), it)
+      else
+        local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+        local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
+        local finish = pos + len
+        if finish > t_start then
+          n = n + 1
+          local res = apply_item_fadeout(it, t_start, t_end, fshape, false)
+          if res == "future" then
+            if keep_mode then
+              reaper.SetMediaItemInfo_Value(it, "B_MUTE", 1)
+            else
+              reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(it), it)
+            end
           end
-        else
-          local new_end = math.min(finish, t_end)
-          local fo = math.max(0.005, new_end - t_start)
-          reaper.SetMediaItemInfo_Value(it, "D_LENGTH", math.max(0.005, new_end - pos))
-          reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN", fo)
-          reaper.SetMediaItemInfo_Value(it, "D_FADEOUTSHAPE", fshape)
-          reaper.UpdateItemInProject(it)
         end
       end
     end
@@ -1703,7 +1908,6 @@ local function stop_all(dur)
 end
 
 local function stop_targets(ids, dur)
-  kill_runs(ids)
   stop_ext(ids, dur)
   local set = {}
   for _, id in ipairs(ids) do set[tostring(id)] = true end
@@ -1712,10 +1916,19 @@ local function stop_targets(ids, dur)
   local effective_dur = immediate and ANTICLICK or dur
   local t_end = t_start + effective_dur
   local n, affected = 0, {}
+  if immediate then
+    kill_runs(ids)
+  else
+    arm_fade_hold(dur)
+    begin_run_fades(ids, t_start, t_end)
+  end
   for i = reaper.CountMediaItems(PROJ)-1, 0, -1 do
     local it = reaper.GetMediaItem(PROJ, i)
     local _, mark = reaper.GetSetMediaItemInfo_String(it, "P_EXT:cuelist_id", "", false)
     if set[mark] then
+      if (not immediate) and is_loop_fading_id(mark) then
+        n = n + 1
+      else
       local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
       local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
       if pos + len > t_start then
@@ -1736,24 +1949,22 @@ local function stop_targets(ids, dur)
               affected[g] = true
             end
           end
-        elseif prefs.delete_on_stop == true then
-          -- Option coché : on coupe / programme la suppression.
-          if pos >= t_start then
-            reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(it), it)
-          else
-            local new_end = math.min(pos + len, t_end)
-            reaper.SetMediaItemInfo_Value(it, "D_LENGTH", new_end - pos)
-            reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN", new_end - t_start)
+        else
+          -- Fondu long : prolonger l'item si besoin pour tenir toute la durée.
+          local res = apply_item_fadeout(it, t_start, t_end, nil, true)
+          if res == "future" then
+            if prefs.delete_on_stop == true then
+              reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(it), it)
+            else
+              reaper.SetMediaItemInfo_Value(it, "B_MUTE", 1)
+            end
+          elseif res and prefs.delete_on_stop == true then
             local _, g = reaper.GetSetMediaItemInfo_String(it, "GUID", "", false)
             affected[g] = true
           end
-        else
-          -- Option décoché : fondu volume seulement, item laissé intact sur la timeline.
-          reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN",
-            math.max(reaper.GetMediaItemInfo_Value(it, "D_FADEOUTLEN"),
-              math.min(len, math.max(0, pos + len - t_start), dur)))
         end
       end
+      end -- not loop-fading
     end
   end
   if prefs.delete_on_stop == true then
@@ -1801,11 +2012,12 @@ local function fire_stop(a)
   end
   if targeted then stop_targets(a.targets, dur) else stop_all(dur) end
   X.apply_linked_preset(a, dur)
-  -- Arrêt du transport = option "Arrêter la lecture…".
-  -- Après le fondu seulement, sinon ESC coupe le fade net.
-  if prefs.auto_stop then
+  -- Arrêt du transport = option "Arrêter la lecture…", UNIQUEMENT après la fin du fade.
+  if prefs.auto_stop == true then
+    local wait = (dur > 0) and (dur + math.max(margin / 1000, 0.05) + 0.1) or 0.01
+    arm_fade_hold(dur)
     del_jobs[#del_jobs + 1] = {
-      at = reaper.time_precise() + (dur > 0 and (dur + margin/1000) or 0.003) + 0.005,
+      at = reaper.time_precise() + wait,
       stop_transport = true
     }
   end
@@ -1868,7 +2080,8 @@ local function capture(tr)
     mute = reaper.GetMediaTrackInfo_Value(tr, "B_MUTE") >= 0.5,
     solo = math.floor(reaper.GetMediaTrackInfo_Value(tr, "I_SOLO") + 0.5), -- 0 / 1 / 2 (SIP)
     arm  = reaper.GetMediaTrackInfo_Value(tr, "I_RECARM") >= 0.5,
-    fx = {}
+    fx = {},
+    sends = {}
   }
   for i = 0, reaper.TrackFX_GetCount(tr)-1 do
     local _, name = reaper.TrackFX_GetFXName(tr, i, "")
@@ -1881,7 +2094,43 @@ local function capture(tr)
     end
     p.fx[#p.fx+1] = f
   end
+  -- Sends piste (cat 0) + sorties hardware (cat 2)
+  for _, cat in ipairs({0, 2}) do
+    for i = 0, reaper.GetTrackNumSends(tr, cat) - 1 do
+      local dest_guid = nil
+      if cat == 0 then
+        local dest = reaper.GetTrackSendInfo_Value(tr, cat, i, "P_DESTTRACK")
+        if dest and reaper.ValidatePtr2(PROJ, dest, "MediaTrack*") then
+          dest_guid = reaper.GetTrackGUID(dest)
+        end
+      end
+      p.sends[#p.sends+1] = {
+        cat = cat,
+        idx = i,
+        dest = dest_guid,
+        vol = reaper.GetTrackSendInfo_Value(tr, cat, i, "D_VOL"),
+        pan = reaper.GetTrackSendInfo_Value(tr, cat, i, "D_PAN"),
+        mute = reaper.GetTrackSendInfo_Value(tr, cat, i, "B_MUTE") >= 0.5,
+      }
+    end
+  end
   return p
+end
+
+-- Retrouve l'index d'un send (par destination GUID si possible).
+local function resolve_send_idx(tr, cat, dest_guid, fallback_idx)
+  if cat == 0 and dest_guid then
+    for i = 0, reaper.GetTrackNumSends(tr, 0) - 1 do
+      local dest = reaper.GetTrackSendInfo_Value(tr, 0, i, "P_DESTTRACK")
+      if dest and reaper.ValidatePtr2(PROJ, dest, "MediaTrack*")
+         and reaper.GetTrackGUID(dest) == dest_guid then
+        return i
+      end
+    end
+  end
+  local n = reaper.GetTrackNumSends(tr, cat)
+  if fallback_idx and fallback_idx >= 0 and fallback_idx < n then return fallback_idx end
+  return nil
 end
 
 local function apply_steps(steps, p)
@@ -1890,6 +2139,16 @@ local function apply_steps(steps, p)
       reaper.SetMediaTrackInfo_Value(s.tr, "D_VOL", lerp_db(s.from, s.to, p))
     elseif s.k == "pan" then
       reaper.SetMediaTrackInfo_Value(s.tr, "D_PAN", s.from + (s.to - s.from)*p)
+    elseif s.k == "sendvol" then
+      local idx = resolve_send_idx(s.tr, s.cat, s.dest, s.idx)
+      if idx then
+        reaper.SetTrackSendInfo_Value(s.tr, s.cat, idx, "D_VOL", lerp_db(s.from, s.to, p))
+      end
+    elseif s.k == "sendpan" then
+      local idx = resolve_send_idx(s.tr, s.cat, s.dest, s.idx)
+      if idx then
+        reaper.SetTrackSendInfo_Value(s.tr, s.cat, idx, "D_PAN", s.from + (s.to - s.from)*p)
+      end
     else
       reaper.TrackFX_SetParamNormalized(s.tr, s.fx, s.p, s.from + (s.to - s.from)*p)
     end
@@ -1916,6 +2175,11 @@ end
 local function current_value(s)
   if s.k == "vol" then return reaper.GetMediaTrackInfo_Value(s.tr, "D_VOL")
   elseif s.k == "pan" then return reaper.GetMediaTrackInfo_Value(s.tr, "D_PAN")
+  elseif s.k == "sendvol" or s.k == "sendpan" then
+    local idx = resolve_send_idx(s.tr, s.cat, s.dest, s.idx)
+    if not idx then return s.to end
+    local parm = (s.k == "sendvol") and "D_VOL" or "D_PAN"
+    return reaper.GetTrackSendInfo_Value(s.tr, s.cat, idx, parm)
   else return reaper.TrackFX_GetParamNormalized(s.tr, s.fx, s.p) end
 end
 
@@ -1947,13 +2211,19 @@ local function start_morph(m)
       reaper.SetMediaTrackInfo_Value(f.tr, "I_SOLO", f.val)
     elseif f.k == "arm" then
       reaper.SetMediaTrackInfo_Value(f.tr, "I_RECARM", f.val)
+    elseif f.k == "sendmute" then
+      local idx = resolve_send_idx(f.tr, f.cat, f.dest, f.idx)
+      if idx then
+        reaper.SetTrackSendInfo_Value(f.tr, f.cat, idx, "B_MUTE", f.val)
+      end
     end
   end
 end
 
 apply_snap = function(a, dur, delay)
   ensure_snap(a)
-  local use = a.use or {vol=true, pan=true, mute=true, solo=true, arm=true, fxen=true, fxpar=true}
+  local use = a.use or {vol=true, pan=true, mute=true, solo=true, arm=true, fxen=true, fxpar=true, send=true}
+  if use.send == nil then use.send = true end
   local steps, enables, track_flags, warns, ntr = {}, {}, {}, {}, 0
   if not a.snap then return 0, warns end
   for _, g in ipairs(a.snap.order) do
@@ -1979,6 +2249,30 @@ apply_snap = function(a, dur, delay)
         end
         if use.arm and d.arm ~= nil then
           track_flags[#track_flags+1] = {tr=tr, k="arm", val=d.arm and 1 or 0}
+        end
+        if use.send and type(d.sends) == "table" then
+          for si, sd in ipairs(d.sends) do
+            local cat = tonumber(sd.cat) or 0
+            local key_base = g.."|send|"..tostring(cat).."|"..(sd.dest or si)
+            if sd.vol ~= nil then
+              steps[#steps+1] = {
+                k="sendvol", tr=tr, cat=cat, idx=sd.idx, dest=sd.dest,
+                to=sd.vol, key=key_base.."|vol"
+              }
+            end
+            if sd.pan ~= nil then
+              steps[#steps+1] = {
+                k="sendpan", tr=tr, cat=cat, idx=sd.idx, dest=sd.dest,
+                to=sd.pan, key=key_base.."|pan"
+              }
+            end
+            if sd.mute ~= nil then
+              track_flags[#track_flags+1] = {
+                tr=tr, k="sendmute", cat=cat, idx=sd.idx, dest=sd.dest,
+                val=sd.mute and 1 or 0
+              }
+            end
+          end
         end
         for i, f in ipairs(d.fx or {}) do
           if f.use then
@@ -2323,12 +2617,17 @@ local function process_jobs()
   process_take_markers(now)
   -- Arrêt transport = option "Arrêter la lecture quand plus aucun média…".
   -- Delete on stop = suppression des items uniquement (indépendant).
-  if prefs.auto_stop then
+  -- Tant qu'un FOLLOW (ou AUTO) est actif, on ne doit NI arrêter le transport
+  -- NI repositionner le curseur : sinon la tête de lecture n'atteint jamais
+  -- follow_end et l'enchaînement reste bloqué.
+  local chain_active = auto_chain ~= nil
+  local fade_active = reaper.time_precise() < (fade_hold_until or 0)
+  if prefs.auto_stop == true and not chain_active and not fade_active then
     if is_playing() then
       np_since = nil
       if cue_session and now - last_scan > 0.25 then
         last_scan = now
-        local still_busy = auto_chain or (next(runs) ~= nil)
+        local still_busy = (next(runs) ~= nil)
         if active_cue_items() or still_busy then
           idle_since = nil
         else
@@ -2348,12 +2647,13 @@ local function process_jobs()
   end
   -- Delete on stop : nettoyer les items restants une fois le transport arrêté,
   -- sans décider d'interrompre ou non la lecture.
+  -- Protégé pendant un FOLLOW/AUTO pour ne pas faire sauter la playhead.
   if not is_playing() then
     np_since = np_since or now
   else
     np_since = nil
   end
-  if prefs.delete_on_stop == true and cue_session and not is_playing() then
+  if prefs.delete_on_stop == true and cue_session and not is_playing() and not chain_active then
     if np_since and (now - np_since) > 0.5 then
       local n = delete_all_cuelist_items()
       local pos = session_origin or reaper.GetCursorPositionEx(PROJ)
@@ -2367,8 +2667,12 @@ local function process_jobs()
   for i = #del_jobs, 1, -1 do
     local j = del_jobs[i]
     if now >= j.at then
+      local keep_job = false
       if j.stop_transport then
-        if prefs.auto_stop then
+        if reaper.time_precise() < (fade_hold_until or 0) or auto_chain then
+          j.at = math.max(j.at, (fade_hold_until or 0) + 0.05)
+          keep_job = true
+        elseif prefs.auto_stop == true then
           stop_here()
           cue_session = false
         end
@@ -2395,7 +2699,9 @@ local function process_jobs()
           reaper.UpdateArrange()
         end
       end
-      table.remove(del_jobs, i)
+      if not keep_job then
+        table.remove(del_jobs, i)
+      end
     end
   end
   for key, j in pairs(fades) do
@@ -2472,7 +2778,7 @@ fire = function(a, from_auto_chain)
   if not a then return end
   -- Toute action déclenchée manuellement remplace le compte à rebours précédent.
   if not from_auto_chain then auto_chain = nil end
-  if a.type == "cue"    then fire_cue(a)
+  if a.type == "cue"    then fire_cue(a, from_auto_chain)
   elseif a.type == "preset" then fire_preset(a)
   elseif a.type == "stop"   then fire_stop(a)
   elseif a.type == "pause"  then fire_pause(a)
@@ -2551,34 +2857,87 @@ local function process_auto_chain()
   -- FOLLOW sur une cue audio attend la fin réelle prévue de sa lecture.
   if chain.mode == "follow" then
     local run = runs[chain.source_id]
+    -- Boucle : attendre l'arrêt réel du run (STOP / Devamp), jamais de relance.
     if chain.wait_for_run and run and run.loop then return end
     if chain.follow_end then
-      -- Le délai ne démarre qu'une fois la tête de lecture arrivée à la fin.
-      -- Un seek vers l'arrière annule le délai ; un seek vers l'avant le recalcule.
       local pos = now_pos()
-      if pos < chain.follow_end then
+      local playing = is_playing()
+      if playing then chain.seen_play = true end
+      local run_gone = (run == nil)
+      -- Anticiper légèrement la fin (buffer audio) pour enchaîner sans trou.
+      local ended = (pos >= chain.follow_end - 0.03)
+        or (chain.seen_play and not playing and run_gone)
+        or (chain.seen_play and not playing and pos >= chain.follow_end - 0.5)
+      if ended then
+        -- Libérer le run source tout de suite (évite d'attendre le +0.15 s de process_runs).
+        if run then
+          runs[chain.source_id] = nil
+          runs[tostring(chain.source_id)] = nil
+        end
+        if not chain.delay_started then
+          chain.delay_started = true
+          local d = math.max(0, tonumber(chain.delay) or 0)
+          chain.deadline = now + d
+          if d <= 0 then
+            -- Enchaînement immédiat : ne pas attendre la frame suivante.
+            chain.deadline = now
+          end
+        end
+      else
         chain.delay_started = false
         chain.deadline = math.huge
         return
       end
+    elseif chain.wait_for_run then
+      if run then return end
+      chain.wait_for_run = false
       if not chain.delay_started then
         chain.delay_started = true
         chain.deadline = now + math.max(0, tonumber(chain.delay) or 0)
       end
-    elseif chain.wait_for_run then
-      if run then return end
-      chain.wait_for_run = false
-      chain.deadline = now + math.max(0, tonumber(chain.delay) or 0)
     end
   end
   if now < chain.deadline then return end
+  -- Enchaînement : uniquement la cue SUIVANTE, jamais la source.
+  local next_id = chain.next_id
+  local source_id = chain.source_id
+  local chain_mode = chain.mode
   auto_chain = nil
-  for _, candidate in ipairs(actions) do
-    if candidate.id == chain.next_id then
+  if next_id == nil or next_id == source_id then
+    status = (chain_mode == "follow" and "FOLLOW" or "AUTO") .. " : pas de cue suivante."
+    return
+  end
+  -- FOLLOW : la source est terminée → on la coupe pour éviter qu'elle continue / se relance.
+  -- AUTO : on ne touche PAS à la source : elle peut continuer (pistes différentes).
+  --        Si même piste, exclusive_track dans fire_cue gère le remplacement.
+  if chain_mode == "follow" and source_id ~= nil then
+    kill_runs({source_id})
+    local sid = tostring(source_id)
+    for i = reaper.CountMediaItems(PROJ) - 1, 0, -1 do
+      local it = reaper.GetMediaItem(PROJ, i)
+      local _, cid = reaper.GetSetMediaItemInfo_String(it, "P_EXT:cuelist_id", "", false)
+      if cid == sid then
+        reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(it), it)
+      end
+    end
+    devamp_flags[source_id] = nil
+    devamp_flags[tostring(source_id)] = nil
+  end
+  for i, candidate in ipairs(actions) do
+    if candidate.id == next_id then
+      -- N° rouge = première cue PAS encore déclenchée (= celle après celle qu'on enchaîne).
+      -- Sinon un GO manuel relancerait la dernière cue auto-exécutée.
+      if actions[i + 1] then
+        selected = actions[i + 1].id
+      else
+        selected = candidate.id
+      end
       fire(candidate, true)
       return
     end
   end
+  status = (chain_mode == "follow" and "FOLLOW" or "AUTO")
+    .. " : cue suivante introuvable (ID " .. tostring(next_id) .. ")."
 end
 
 ---------------------------------------------------------------- Interface utilitaires
@@ -2763,7 +3122,7 @@ local function go_selected()
   end
 end
 
-local TYPE_LABEL = {cue="CUE", preset="PRESET", stop="STOP", pause="PAUSE", devamp="DEVAMP", osc="OSC", midi="MIDI"}
+X.TYPE_LABEL = {cue="CUE", preset="PRESET", stop="STOP", pause="PAUSE", devamp="DEVAMP", osc="OSC", midi="MIDI"}
 
 local function track_combo(label, guid, allow_none)
   local tr = find_track(guid)
@@ -2800,7 +3159,7 @@ local function add_action(t)
   if t == "cue" then a.fadein = 0; a.track = default_track_guid() end
   if t == "stop" then a.dur = 0.0 end
   if t == "pause" then a.dur = 0.5; a.unpause = false end
-  if t == "preset" then a.dur = 0.0; a.use = {vol=true, pan=true, mute=true, solo=true, arm=true, fxen=true, fxpar=true} end
+  if t == "preset" then a.dur = 0.0; a.use = {vol=true, pan=true, mute=true, solo=true, arm=true, fxen=true, fxpar=true, send=true} end
   if t == "osc" then a.port_name = ""; a.address = "/"; a.args = {} end
   if t == "midi" then
     a.midi_type = "note"; a.channel = 1
@@ -2817,7 +3176,8 @@ end
 ---------------------------------------------------------------- Snap editor
 local function draw_snap_editor(a)
   ensure_snap(a)
-  a.use = a.use or {vol=true, pan=true, mute=true, solo=true, arm=true, fxen=true, fxpar=true}
+  a.use = a.use or {vol=true, pan=true, mute=true, solo=true, arm=true, fxen=true, fxpar=true, send=true}
+  if a.use.send == nil then a.use.send = true end
   if reaper.ImGui_Button(ctx, "Capturer les pistes sélectionnées") then
     local n = reaper.CountSelectedTracks(PROJ)
     if n == 0 then
@@ -2865,6 +3225,12 @@ local function draw_snap_editor(a)
     x, u.fxen  = reaper.ImGui_Checkbox(ctx, "FX actif/bypass", u.fxen) ; if x then save() end
     reaper.ImGui_SameLine(ctx)
     x, u.fxpar = reaper.ImGui_Checkbox(ctx, "Paramètres FX", u.fxpar) ; if x then save() end
+    reaper.ImGui_SameLine(ctx)
+    if u.send == nil then u.send = true end
+    x, u.send  = reaper.ImGui_Checkbox(ctx, "Sends", u.send) ; if x then save() end
+    if reaper.ImGui_IsItemHovered(ctx) then
+      reaper.ImGui_SetTooltip(ctx, "Niveaux / pan / mute des sends (piste et hardware).")
+    end
     if reaper.ImGui_TreeNode(ctx, "Détail des effets##fxdetail") then
       for _, g in ipairs(a.snap.order) do
         local st = a.snap.tracks[g]
@@ -2884,8 +3250,8 @@ local function draw_snap_editor(a)
 end
 
 ---------------------------------------------------------------- Forme d'onde
-local DB_MIN, DB_MAX = -60, 12
-local C_LEFT, C_RIGHT = reaper.ImGui_MouseButton_Left(), reaper.ImGui_MouseButton_Right()
+X.DB_MIN, X.DB_MAX = -60, 12
+X.C_LEFT, X.C_RIGHT = reaper.ImGui_MouseButton_Left(), reaper.ImGui_MouseButton_Right()
 
 local function get_wave(file)
   local w = wave_cache[file]
@@ -2971,15 +3337,15 @@ local function get_wave_view(file, t0, t1, n_samples)
 end
 
 local function g_to_frac(g)
-  local db = (g <= 0.001) and DB_MIN or 20 * math.log(g, 10)
-  db = math.max(DB_MIN, math.min(DB_MAX, db))
-  return (db - DB_MIN) / (DB_MAX - DB_MIN)
+  local db = (g <= 0.001) and X.DB_MIN or 20 * math.log(g, 10)
+  db = math.max(X.DB_MIN, math.min(X.DB_MAX, db))
+  return (db - X.DB_MIN) / (X.DB_MAX - X.DB_MIN)
 end
 
 local function frac_to_g(f)
   f = math.max(0, math.min(1, f))
-  local db = DB_MIN + f * (DB_MAX - DB_MIN)
-  if db <= DB_MIN + 0.5 then return 0 end
+  local db = X.DB_MIN + f * (X.DB_MAX - X.DB_MIN)
+  if db <= X.DB_MIN + 0.5 then return 0 end
   if math.abs(db) < 0.7 then return 1 end
   return 10 ^ (db / 20)
 end
@@ -3596,7 +3962,7 @@ local function draw_wave_editor(a)
   end
 
   for _, db in ipairs({-48, -36, -24, -12, 0}) do
-    local yy = yb1 - ((db - DB_MIN)/(DB_MAX - DB_MIN)) * hw
+    local yy = yb1 - ((db - X.DB_MIN)/(X.DB_MAX - X.DB_MIN)) * hw
     reaper.ImGui_DrawList_AddLine(dl, x0, yy, x0+cw, yy, db == 0 and 0x808040AA or 0x40404088, 1)
     reaper.ImGui_DrawList_AddText(dl, x0+3, yy - S(13), 0x909090FF, db.." dB")
   end
@@ -3711,7 +4077,7 @@ local function draw_wave_editor(a)
 
   reaper.ImGui_SetCursorScreenPos(ctx, x0, y0)
   reaper.ImGui_InvisibleButton(ctx, "##inband", cw, hb)
-  if reaper.ImGui_IsItemClicked(ctx, C_LEFT) then
+  if reaper.ImGui_IsItemClicked(ctx, X.C_LEFT) then
     local mxs, mys = reaper.ImGui_GetMousePos(ctx)
     local mid_y = y0 + tag_h
     local d_in  = math.abs(mxs - xin)
@@ -3743,7 +4109,7 @@ local function draw_wave_editor(a)
   local body_hover = area_hover and my >= yb0 and my <= yb1
 
   -- Clic près des poignées Li/Lo en haut de la waveform → drag
-  if area_hover and reaper.ImGui_IsItemClicked(ctx, C_LEFT) and show_loop_handles then
+  if area_hover and reaper.ImGui_IsItemClicked(ctx, X.C_LEFT) and show_loop_handles then
     local hsz = S(14)
     if my <= yb0 + hsz * 2 then
       local d_li = math.abs(mx - xli)
@@ -3816,8 +4182,8 @@ local function draw_wave_editor(a)
     return hit
   end
 
-  local clicked_left = reaper.ImGui_IsItemClicked(ctx, C_LEFT)
-  local clicked_right = reaper.ImGui_IsItemClicked(ctx, C_RIGHT)
+  local clicked_left = reaper.ImGui_IsItemClicked(ctx, X.C_LEFT)
+  local clicked_right = reaper.ImGui_IsItemClicked(ctx, X.C_RIGHT)
   if clicked_left or clicked_right then
     local marker_hit = hit_marker()
     local in_wave_body = my >= yb0 and my <= yb1
@@ -3921,7 +4287,7 @@ local function draw_wave_editor(a)
   if X.view_drag then
     if X.view_drag.id ~= a.id then
       X.view_drag = nil
-    elseif reaper.ImGui_IsMouseDown(ctx, C_LEFT) then
+    elseif reaper.ImGui_IsMouseDown(ctx, X.C_LEFT) then
       local dx = mx - X.view_drag.mx0
       local vw = X.view_drag.view_w or view_w
       local cww = math.max(1, X.view_drag.cw or cw)
@@ -3939,7 +4305,7 @@ local function draw_wave_editor(a)
   if marker_drag then
     if marker_drag.id ~= a.id then
       marker_drag = nil
-    elseif reaper.ImGui_IsMouseDown(ctx, C_LEFT) then
+    elseif reaper.ImGui_IsMouseDown(ctx, X.C_LEFT) then
       local marker = a.markers[marker_drag.idx]
       if marker then marker.t = math.max(0, math.min(L, xt(mx) + (marker_drag.offset or 0))) end
     else
@@ -3952,7 +4318,7 @@ local function draw_wave_editor(a)
     end
   end
   if wf_drag then
-    if reaper.ImGui_IsMouseDown(ctx, C_LEFT) then
+    if reaper.ImGui_IsMouseDown(ctx, X.C_LEFT) then
       local t = math.max(0, math.min(L, xt(mx)))
       if wf_drag == "in" then
         local old = a.inpt
@@ -3978,7 +4344,7 @@ local function draw_wave_editor(a)
     end
   end
   if cv_drag then
-    if reaper.ImGui_IsMouseDown(ctx, C_LEFT) then
+    if reaper.ImGui_IsMouseDown(ctx, X.C_LEFT) then
       local pt = env[cv_drag.idx]
       if pt then
         local lo = env[cv_drag.idx-1] and (env[cv_drag.idx-1].t + 0.001) or a.inpt
@@ -4364,8 +4730,21 @@ end
 ---------------------------------------------------------------- Préférences
 local function draw_prefs()
   if reaper.ImGui_CollapsingHeader(ctx, "Préférences générales") then
-    local c1, v1 = reaper.ImGui_Checkbox(ctx, "Arrêter la lecture quand plus aucun média n'est joué", prefs.auto_stop)
-    if c1 then prefs.auto_stop = v1; cue_session, idle_since = false, nil; save() end
+    local c1, v1 = reaper.ImGui_Checkbox(ctx, "Arrêter la lecture quand plus aucun média n'est joué", prefs.auto_stop == true)
+    if c1 then
+      prefs.auto_stop = v1 and true or false
+      cue_session, idle_since = false, nil
+      save()
+      status = prefs.auto_stop and "Auto-stop transport : ACTIVÉ" or "Auto-stop transport : DÉSACTIVÉ"
+    end
+    if reaper.ImGui_IsItemHovered(ctx) then
+      reaper.ImGui_SetTooltip(ctx,
+        "Coché : le script arrête le transport quand plus aucun item ActionList ne joue.\n"
+        .. "Décoché : le script ne touche PAS au transport.\n"
+        .. "Note : pendant un FOLLOW/AUTO, cette option est temporairement ignorée.\n"
+        .. "Si la lecture s'arrête quand même, vérifie les options projet REAPER\n"
+        .. "(Stop at end of project) et « Delete on stop ».")
+    end
     local c2, v2 = reaper.ImGui_Checkbox(ctx, "Delete on stop", prefs.delete_on_stop == true)
     if c2 then
       prefs.delete_on_stop = v2 and true or false
@@ -4698,20 +5077,6 @@ local function draw()
   if reaper.ImGui_Button(ctx, "+ OSC") then add_action("osc") end
   reaper.ImGui_SameLine(ctx)
   if reaper.ImGui_Button(ctx, "+ MIDI") then add_action("midi") end
-  reaper.ImGui_SameLine(ctx)
-  reaper.ImGui_SameLine(ctx)
-  reaper.ImGui_TextDisabled(ctx, "Ctrl/Cmd+C couper/copier · Ctrl/Cmd+V coller")
-  reaper.ImGui_SameLine(ctx)
-  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), 0xB22222FF)
-  if reaper.ImGui_Button(ctx, "STOP (Échap)") then auto_chain = nil; fire_stop({dur = stop_fade}) end
-  reaper.ImGui_PopStyleColor(ctx)
-  reaper.ImGui_SameLine(ctx)
-  reaper.ImGui_SetNextItemWidth(ctx, S(80))
-  local cf, sf = reaper.ImGui_InputDouble(ctx, "Fade stop (s)", stop_fade)
-  if cf then
-    stop_fade = math.max(0, sf)
-    reaper.SetExtState(EXT, "stopfade", tostring(stop_fade), true)
-  end
 
   if reaper.ImGui_Button(ctx, "New") then
     if reaper.MB("Créer une nouvelle session ?\nToutes les listes et tous leurs onglets seront vidés.", "ActionList — Nouvelle session", 4) == 6 then
@@ -4794,6 +5159,17 @@ local function draw()
   reaper.ImGui_SameLine(ctx)
   if reaper.ImGui_Button(ctx, "↷##redo", icon_size, icon_size) then redo_change() end
   if reaper.ImGui_IsItemHovered(ctx) then reaper.ImGui_SetTooltip(ctx, "Rétablir") end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), 0xB22222FF)
+  if reaper.ImGui_Button(ctx, "STOP (Échap)") then auto_chain = nil; fire_stop({dur = stop_fade}) end
+  reaper.ImGui_PopStyleColor(ctx)
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_SetNextItemWidth(ctx, S(80))
+  local cf, sf = reaper.ImGui_InputDouble(ctx, "Fade stop (s)", stop_fade)
+  if cf then
+    stop_fade = math.max(0, sf)
+    reaper.SetExtState(EXT, "stopfade", tostring(stop_fade), true)
+  end
 
   reaper.ImGui_Separator(ctx)
   draw_prefs()
@@ -5038,7 +5414,7 @@ local function draw()
         end
 
         reaper.ImGui_TableSetColumnIndex(ctx, 2)
-        local type_label = TYPE_LABEL[a.type] or "?"
+        local type_label = X.TYPE_LABEL[a.type] or "?"
         if a.type == "stop" and (tonumber(a.dur) or 0) > 0 then type_label = "FADEOUT" end
         local lx, ly = reaper.ImGui_GetCursorScreenPos(ctx)
         reaper.ImGui_Text(ctx, type_label)
@@ -5213,7 +5589,7 @@ local function draw()
       reaper.ImGui_SetMouseCursor(ctx, reaper.ImGui_MouseCursor_ResizeNS())
     end
   end
-  if sep_active and reaper.ImGui_IsMouseDown(ctx, C_LEFT) then
+  if sep_active and reaper.ImGui_IsMouseDown(ctx, X.C_LEFT) then
     local _, mouse_y = reaper.ImGui_GetMousePos(ctx)
     local _, window_y = reaper.ImGui_GetWindowPos(ctx)
     local _, window_h = reaper.ImGui_GetWindowSize(ctx)
@@ -5248,20 +5624,54 @@ local function draw()
 end
 
 ---------------------------------------------------------------- Boucle principale
-local function loop()
+-- (pas de "local function" ici : limite Lua 200 locales au niveau module)
+function X.loop()
   process_jobs()
   poll_midi_note_offs()
   process_auto_chain()
   reaper.ImGui_SetNextWindowSize(ctx, 720, 820, reaper.ImGui_Cond_FirstUseEver())
-  local visible, open = reaper.ImGui_Begin(ctx, "Actions##v2", true)
+  local visible, open = reaper.ImGui_Begin(ctx, "Realive v1.4.11 — Actions##v2", true)
   if visible then
     if reaper.ImGui_SetWindowFontScale then reaper.ImGui_SetWindowFontScale(ctx, ui_scale) end
     draw()
     reaper.ImGui_End(ctx)
   end
-  if open then reaper.defer(loop) end
+  if open then reaper.defer(X.loop) end
 end
 
 load_data()
 history_last = current_data_string()
-reaper.defer(loop)
+
+-- Couper le métronome (40364 = Options: Toggle metronome).
+-- Tentatives multiples car GetToggleCommandState peut renvoyer -1 au tout premier instant.
+do
+  local function metro_state()
+    if reaper.GetToggleCommandStateEx then
+      return reaper.GetToggleCommandStateEx(0, 40364)
+    end
+    return reaper.GetToggleCommandState(40364)
+  end
+  local st = metro_state()
+  if st == 1 then
+    reaper.Main_OnCommand(40364, 0)
+  end
+  -- SWS si disponible
+  if reaper.SNM_SetIntConfigVar then
+    reaper.SNM_SetIntConfigVar("projmetroen", 0)
+  end
+  -- Seconde passe différée (REAPER parfois pas prêt à l'init)
+  reaper.defer(function()
+    if metro_state() == 1 then
+      reaper.Main_OnCommand(40364, 0)
+    end
+    if reaper.SNM_SetIntConfigVar then
+      reaper.SNM_SetIntConfigVar("projmetroen", 0)
+    end
+  end)
+  st = metro_state()
+  status = (st == 1)
+    and "Realive v1.4.11 — métronome encore ON (toggle échoué)."
+    or "Realive v1.4.11 prêt — métronome off."
+end
+
+reaper.defer(X.loop)
