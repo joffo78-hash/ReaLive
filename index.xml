@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Realive" commit="b77bc277448b62825a8d4ab0263dfd3bb16d51bf">
+<index version="1" name="Realive" commit="d7b098254f30653415cc48fc8e1a70440cee8259">
   <category name="Scripts/Realive">
     <reapack name="Realive.lua" type="script" desc="Realive — système de cues pour REAPER">
       <metadata>
@@ -7,9 +7,10 @@
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
 \widowctrl\hyphauto
 
-{\pard \ql \f0 \sa180 \li0 \fi0 Realive est un syst\u232 ?me de lancement de cues pour REAPER. N\u233 ?cessite REAPER et ReaImGui. La compatibilit\u233 ? multiplateforme et la fonction OSC restent \u224 ? v\u233 ?rifier avant une annonce publique.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Realive est un syst\u232 ?me de cues de type QLab pour REAPER. N\u233 ?cessite ReaImGui. Les fonctions OSC n\u233 ?cessitent Mavriq Lua Sockets.\par}
 }
 ]]></description>
+        <link rel="website">https://github.com/joffo78-hash/Realive</link>
       </metadata>
       <version name="1.0" author="joffo78-hash" time="2026-10-28T10:26:47Z">
         <changelog><![CDATA[Première version préparée pour l'indexation ReaPack.]]></changelog>
@@ -18,6 +19,9 @@
       <version name="1.01" author="joffo78-hash" time="2026-10-28T15:10:44Z">
         <changelog><![CDATA[Première version préparée pour l'indexation ReaPack.]]></changelog>
         <source main="main">https://github.com/joffo78-hash/ReaLive/raw/b77bc277448b62825a8d4ab0263dfd3bb16d51bf/Scripts/Realive/Realive.lua</source>
+      </version>
+      <version name="1.2" author="joffo78-hash" time="2026-10-29T08:46:15Z">
+        <source main="main">https://github.com/joffo78-hash/ReaLive/raw/d7b098254f30653415cc48fc8e1a70440cee8259/Scripts/Realive/Realive.lua</source>
       </version>
     </reapack>
   </category>
