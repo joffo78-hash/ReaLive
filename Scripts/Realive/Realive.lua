@@ -41,22 +41,40 @@ local socket_init_status = "OSC désactivé : installer/mettre à jour Mavriq Lu
 
 do
   local resource = reaper.GetResourcePath()
+  local base = resource .. "/Scripts/Mavriq ReaScript Repository/Various/"
   local roots = {
-    resource .. "/Scripts/Mavriq ReaScript Repository/Various/Mavriq-Lua-Sockets",
+    base .. "Mavriq-Lua-Sockets",
+    base .. "Mavriq Lua Sockets",
+    base .. "Mavriq lua sockets",
+    base .. "Mavriq Lua Sockets 1.2",
     resource .. "/Scripts/Mavriq-Lua-Sockets",
+    resource .. "/Scripts/Mavriq Lua Sockets",
   }
-  local socket_root
+
+  -- Les modules natifs n'ont pas la même extension selon le système :
+  -- Windows .dll ; macOS/Linux .so (certaines distributions utilisent .dylib).
+  local binary_names = {"socket/core.dll", "socket/core.so", "socket/core.dylib"}
+  local socket_root, socket_binary
   for _, root in ipairs(roots) do
-    local f = io.open(root .. "/socket/core.dll", "rb")
-    if f then
-      f:close()
-      socket_root = root
-      break
+    for _, binary in ipairs(binary_names) do
+      local f = io.open(root .. "/" .. binary, "rb")
+      if f then
+        f:close()
+        socket_root, socket_binary = root, binary
+        break
+      end
     end
+    if socket_root then break end
   end
+
   if socket_root then
-    package.cpath = socket_root .. "/?.dll;" .. package.cpath
-    package.path = socket_root .. "/?.lua;" .. socket_root .. "/?/init.lua;" .. package.path
+    -- require("socket.core") transforme le point en séparateur de dossier :
+    -- le motif /?.so permet donc de trouver /socket/core.so sur macOS.
+    local ext = socket_binary:match("%.([^%.]+)$")
+    package.cpath = socket_root .. "/?." .. ext .. ";" .. package.cpath
+    package.path = socket_root .. "/?.lua;" ..
+                   socket_root .. "/?/init.lua;" .. package.path
+
     local ok, sock = pcall(require, "socket.core")
     if ok and type(sock) == "table" and type(sock.udp) == "function" then
       socket = sock
@@ -88,11 +106,13 @@ do
         return pad(msg) .. pad(tags) .. data
       end
     else
-      socket_init_status = "OSC désactivé : Mavriq Lua Sockets trouvé, mais socket.core n'a pas pu être chargé. Vérifier que la version installée est 1.2."
+      socket_init_status = "OSC désactivé : Mavriq Lua Sockets a été trouvé, mais socket.core n'a pas pu être chargé. Vérifier que la version installée correspond à REAPER et au système."
       if not ok then
         socket_init_status = socket_init_status .. " Détail Lua : " .. tostring(sock)
       end
     end
+  else
+    socket_init_status = "OSC désactivé : fichier natif LuaSocket introuvable. Installer Mavriq Lua Sockets 1.2 via ReaPack."
   end
 end
 
