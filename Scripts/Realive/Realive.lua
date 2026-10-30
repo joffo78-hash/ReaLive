@@ -1,9 +1,14 @@
 -- @description Realive — système de cues pour REAPER
--- @version 1.5.3
+-- @version 1.5.4
 -- @author joffo78-hash
 -- @link https://buymeacoffee.com/joffo
 -- @about
---   Realive est un système de cues de type QLab pour REAPER.
+--   ReaLive vous est utile ?
+--   ReaLive est développé pour faciliter la régie de spectacle vivant au sein de REAPER.
+--   Si cet outil vous aide dans vos projets, vous pouvez soutenir son développement
+--   en offrant un café à son créateur. Chaque contribution est appréciée et contribue
+--   à faire évoluer le projet. Merci de faire vivre ReaLive !
+--
 --   Nécessite ReaImGui. Les fonctions OSC nécessitent Mavriq Lua Sockets.
 --
 -- ActionList.lua
