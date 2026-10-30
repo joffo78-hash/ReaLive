@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Realive" commit="a9843a2bbbe33cc00fff8f287cac96a08b572f8e">
+<index version="1" name="Realive" commit="9116c2b4ae917d5ed582204bfebd2f2cf04c4aeb">
   <category name="Scripts/Realive">
     <reapack name="Realive.lua" type="script" desc="Realive — système de cues pour REAPER">
       <metadata>
@@ -7,10 +7,11 @@
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
 \widowctrl\hyphauto
 
-{\pard \ql \f0 \sa180 \li0 \fi0 Realive est un syst\u232 ?me de cues de type QLab pour REAPER. N\u233 ?cessite ReaImGui. Les fonctions OSC n\u233 ?cessitent Mavriq Lua Sockets.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 ReaLive vous est utile ? ReaLive est d\u233 ?velopp\u233 ? pour faciliter la r\u233 ?gie de spectacle vivant au sein de REAPER. Si cet outil vous aide dans vos projets, vous pouvez soutenir son d\u233 ?veloppement en offrant un caf\u233 ? \u224 ? son cr\u233 ?ateur. Chaque contribution est appr\u233 ?ci\u233 ?e et contribue \u224 ? faire \u233 ?voluer le projet. Merci de faire vivre ReaLive !\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 N\u233 ?cessite ReaImGui. Les fonctions OSC n\u233 ?cessitent Mavriq Lua Sockets.\par}
 }
 ]]></description>
-        <link rel="website">https://github.com/joffo78-hash/Realive</link>
+        <link rel="website">https://buymeacoffee.com/joffo</link>
       </metadata>
       <version name="1.0" author="joffo78-hash" time="2026-10-28T10:26:47Z">
         <changelog><![CDATA[Première version préparée pour l'indexation ReaPack.]]></changelog>
