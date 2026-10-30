@@ -1,9 +1,7 @@
 -- @description Realive — système de cues pour REAPER
--- @version 1.5.4
+-- @version 1.5.2
 -- @author joffo78-hash
 -- @link https://github.com/joffo78-hash/Realive
--- @donation https://buymeacoffee.com/joffo
--- @changelog Ajout du lien pour soutenir le projet via Buy Me a Coffee.
 -- @about
 --   Realive est un système de cues de type QLab pour REAPER.
 --   Nécessite ReaImGui. Les fonctions OSC nécessitent Mavriq Lua Sockets.
@@ -5974,6 +5972,25 @@ function X.draw_prefs()
       local csat, sat = reaper.ImGui_SliderDouble(ctx, "Saturation##accent_saturation", tonumber(prefs.accent_saturation) or 1, 0, 1, "%.2f")
       if csat then prefs.accent_saturation = sat; X.save() end
       reaper.ImGui_EndPopup(ctx)
+    end
+
+    -- Bouton de soutien, aligné à droite sur la ligne « Apparence de l’interface ».
+    if reaper.ImGui_GetWindowWidth and reaper.ImGui_SetCursorPosX then
+      reaper.ImGui_SameLine(ctx)
+      reaper.ImGui_SetCursorPosX(ctx, math.max(reaper.ImGui_GetCursorPosX(ctx), reaper.ImGui_GetWindowWidth(ctx) - X.S(165)))
+    else
+      reaper.ImGui_SameLine(ctx)
+    end
+    if reaper.ImGui_Button(ctx, "☕ Soutenir ReaLive##support_bmac") then
+      local url = "https://buymeacoffee.com/joffo"
+      if reaper.CF_ShellExecute then
+        reaper.CF_ShellExecute(url)
+      else
+        reaper.MB("Pour soutenir ReaLive, ouvre cette adresse dans ton navigateur :\n" .. url, "Soutenir ReaLive", 0)
+      end
+    end
+    if reaper.ImGui_IsItemHovered and reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+      reaper.ImGui_SetTooltip(ctx, "Ouvrir la page Buy Me a Coffee de ReaLive")
     end
   end
 end
