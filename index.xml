@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Realive" commit="9116c2b4ae917d5ed582204bfebd2f2cf04c4aeb">
+<index version="1" name="Realive" commit="58dbeaeeaa64b1006f400c8e91003d995df2278a">
   <category name="Scripts/Realive">
     <reapack name="Realive.lua" type="script" desc="Realive — système de cues pour REAPER">
       <metadata>
@@ -7,7 +7,10 @@
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
 \widowctrl\hyphauto
 
-{\pard \ql \f0 \sa180 \li0 \fi0 ReaLive vous est utile ? ReaLive est d\u233 ?velopp\u233 ? pour faciliter la r\u233 ?gie de spectacle vivant au sein de REAPER. Si cet outil vous aide dans vos projets, vous pouvez soutenir son d\u233 ?veloppement en offrant un caf\u233 ? \u224 ? son cr\u233 ?ateur. Chaque contribution est appr\u233 ?ci\u233 ?e et contribue \u224 ? faire \u233 ?voluer le projet. Merci de faire vivre ReaLive !\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \u9749 ? ReaLive vous est utile ?\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 ReaLive est d\u233 ?velopp\u233 ? pour faciliter la r\u233 ?gie de spectacle vivant au sein de REAPER.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Si cet outil vous aide dans vos projets, vous pouvez soutenir son d\u233 ?veloppement en offrant un caf\u233 ? \u224 ? son cr\u233 ?ateur. Chaque contribution est appr\u233 ?ci\u233 ?e et contribue \u224 ? faire \u233 ?voluer le projet. Merci de faire vivre ReaLive !\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Pour soutenir le projet, cliquez sur le bouton \u171 ? Website \u187 ? en bas \u224 ? gauche.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 N\u233 ?cessite ReaImGui. Les fonctions OSC n\u233 ?cessitent Mavriq Lua Sockets.\par}
 }
 ]]></description>
@@ -42,6 +45,9 @@
       <version name="1.5.4" author="joffo78-hash" time="2026-10-30T15:55:28Z">
         <changelog><![CDATA[Ajout du lien pour soutenir le projet via Buy Me a Coffee.]]></changelog>
         <source main="main">https://github.com/joffo78-hash/ReaLive/raw/521b0bafd03b282adaab4ef822af4ee78218ad0a/Scripts/Realive/Realive.lua</source>
+      </version>
+      <version name="1.5.5" author="joffo78-hash" time="2026-10-30T16:13:20Z">
+        <source main="main">https://github.com/joffo78-hash/ReaLive/raw/58dbeaeeaa64b1006f400c8e91003d995df2278a/Scripts/Realive/Realive.lua</source>
       </version>
     </reapack>
   </category>
