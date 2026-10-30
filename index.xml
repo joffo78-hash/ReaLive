@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Realive" commit="d142f54b498e62b29c6d2fd32e0a8b3109381f6c">
+<index version="1" name="Realive" commit="521b0bafd03b282adaab4ef822af4ee78218ad0a">
   <category name="Scripts/Realive">
     <reapack name="Realive.lua" type="script" desc="Realive — système de cues pour REAPER">
       <metadata>
@@ -11,6 +11,7 @@
 }
 ]]></description>
         <link rel="website">https://github.com/joffo78-hash/Realive</link>
+        <link rel="donation">https://buymeacoffee.com/joffo</link>
       </metadata>
       <version name="1.0" author="joffo78-hash" time="2026-10-28T10:26:47Z">
         <changelog><![CDATA[Première version préparée pour l'indexation ReaPack.]]></changelog>
@@ -37,6 +38,10 @@
       </version>
       <version name="1.5.3" author="joffo78-hash" time="2026-10-30T15:33:43Z">
         <source main="main">https://github.com/joffo78-hash/ReaLive/raw/d142f54b498e62b29c6d2fd32e0a8b3109381f6c/Scripts/Realive/Realive.lua</source>
+      </version>
+      <version name="1.5.4" author="joffo78-hash" time="2026-10-30T15:55:28Z">
+        <changelog><![CDATA[Ajout du lien pour soutenir le projet via Buy Me a Coffee.]]></changelog>
+        <source main="main">https://github.com/joffo78-hash/ReaLive/raw/521b0bafd03b282adaab4ef822af4ee78218ad0a/Scripts/Realive/Realive.lua</source>
       </version>
     </reapack>
   </category>
