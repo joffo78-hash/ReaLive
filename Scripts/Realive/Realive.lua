@@ -1,5 +1,5 @@
 -- @description Realive — système de cues pour REAPER
--- @version 1.5.2
+-- @version 1.5.3
 -- @author joffo78-hash
 -- @link https://github.com/joffo78-hash/Realive
 -- @about
@@ -647,6 +647,52 @@ function X.is_loop_fading_id(id)
   return r and r.alive and r.loop and r.fade_out_end ~= nil
 end
 
+-- Récupère un BPM source explicite (métadonnées REAPER, ou nom de fichier du type "120bpm").
+-- Sans BPM source connu, il est impossible de calculer un étirement musical fiable.
+function X.source_bpm(file)
+  if type(file) ~= "string" or file == "" then return nil end
+  local src = reaper.PCM_Source_CreateFromFile(file)
+  if src then
+    if reaper.GetMediaFileMetadata then
+      local _, ids = reaper.GetMediaFileMetadata(src, "")
+      for key in tostring(ids or ""):gmatch("[^\r\n]+") do
+        local lk = key:lower()
+        if lk:find("bpm", 1, true) or lk:find("tempo", 1, true) then
+          local _, value = reaper.GetMediaFileMetadata(src, key)
+          local n = tonumber(tostring(value or ""):match("[%d%.]+"))
+          if n and n >= 20 and n <= 400 then
+            reaper.PCM_Source_Destroy(src)
+            return n
+          end
+        end
+      end
+    end
+    reaper.PCM_Source_Destroy(src)
+  end
+  local base = file:match("([^/\\]+)$") or file
+  local n = base:lower():match("(%d+%.?%d*)%s*bpm")
+  n = tonumber(n)
+  if n and n >= 20 and n <= 400 then return n end
+  return nil
+end
+
+function X.cue_effective_speed(a, pos)
+  local speed = math.max(0.01, math.min(16, tonumber(a and a.wave_speed) or 1))
+  if not (a and a.wave_stretch_tempo) then return speed, 1 end
+  local src_bpm = X.source_bpm(a.file)
+  if not src_bpm then return speed, 1 end
+  local project_bpm
+  if reaper.TimeMap2_GetDividedBpmAtTime then
+    project_bpm = reaper.TimeMap2_GetDividedBpmAtTime(PROJ, tonumber(pos) or X.now_pos())
+  end
+  if not project_bpm or project_bpm <= 0 then
+    project_bpm = select(1, reaper.GetProjectTimeSignature2(PROJ))
+  end
+  if not project_bpm or project_bpm <= 0 then return speed, 1 end
+  local ratio = math.max(0.25, math.min(4, project_bpm / src_bpm))
+  return math.max(0.01, math.min(16, speed * ratio)), ratio
+end
+
 function X.add_file_item(dest, file, pos, tin, seg, fadein, gain, id, markers)
   local src = reaper.PCM_Source_CreateFromFile(file)
   if not src then return nil end
@@ -659,15 +705,26 @@ function X.add_file_item(dest, file, pos, tin, seg, fadein, gain, id, markers)
   -- D_LENGTH est en temps projet. Avec un playrate, la durée projet doit être
   -- segment_source / vitesse pour que tout le segment soit entendu une seule fois.
   local speed = 1
+  local tempo_ratio = 1
   if cue then
     local db = tonumber(cue.wave_gain_db) or 0
     reaper.SetMediaItemTakeInfo_Value(ntk, "D_VOL", (gain or 1) * (10 ^ (db / 20)))
     reaper.SetMediaItemTakeInfo_Value(ntk, "D_PAN", math.max(-1, math.min(1, tonumber(cue.wave_pan) or 0)))
-    speed = math.max(0.01, math.min(16, tonumber(cue.wave_speed) or 1))
+    speed, tempo_ratio = X.cue_effective_speed(cue, pos)
     reaper.SetMediaItemTakeInfo_Value(ntk, "D_PLAYRATE", speed)
+    -- Le tempo est appliqué par un ratio de lecture calculé depuis le BPM source.
+    -- On évite C_AUTOSTRETCH sur les items de lecture temps réel : sans BPM source,
+    -- REAPER peut produire un étirement invalide sur ces items courts/recoupés.
+    reaper.SetMediaItemTakeInfo_Value(ntk, "B_PPITCH", (cue.wave_stretch_tempo and tempo_ratio ~= 1) and 1 or 0)
     local pitch = tonumber(cue.wave_pitch) or 0
     if cue.wave_pitch_link then pitch = 12 * (math.log(speed) / math.log(2)) end
     reaper.SetMediaItemTakeInfo_Value(ntk, "D_PITCH", pitch)
+    -- L'inversion est portée par la source SECTION native de REAPER.
+    if X.set_item_reverse then X.set_item_reverse(new, cue.wave_reverse) end
+    -- L'adaptation initiale est calculée explicitement depuis le BPM source ;
+    -- ne pas activer C_AUTOSTRETCH sur les items internes de ReaLive.
+    reaper.SetMediaItemInfo_Value(new, "C_BEATATTACHMODE", 0)
+    reaper.SetMediaItemInfo_Value(new, "C_AUTOSTRETCH", 0)
   end
   local proj_len = math.max(0.001, (tonumber(seg) or 0) / speed)
   reaper.SetMediaItemInfo_Value(new, "D_POSITION", pos)
@@ -874,7 +931,7 @@ function X.replan_loop_run(a, r)
   r.li = math.max(r.tin, math.min(tonumber(a.loop_in) or r.tin, r.tout - 0.01))
   r.lo = math.max(r.li + 0.01, math.min(tonumber(a.loop_out) or r.tout, r.tout))
   r.seg = r.lo - r.li
-  r.speed = math.max(0.01, math.min(16, tonumber(a.wave_speed) or 1))
+  r.speed = X.cue_effective_speed(a, X.now_pos())
   r.env = a.env or r.env or {}
   r.markers = a.markers or r.markers or {}
   local speed = r.speed
@@ -1895,7 +1952,7 @@ function X.fire_cue(a, from_chain)
       if prefs.exclusive_track ~= false then
         X.replace_on_tracks(used, a.id, target, fadein)
       end
-      local speed = math.max(0.01, math.min(16, tonumber(a.wave_speed) or 1))
+      local speed = X.cue_effective_speed(a, target)
       -- Recaler si la playhead a avancé pendant la préparation (toujours devant).
       do
         local now_t = X.now_pos() + exclusive_look
@@ -3896,7 +3953,7 @@ function X.apply_cue_changes(a)
     local r = runs[a.id]
     r.tin = a.inpt
     r.seg = a.outpt - a.inpt
-    r.speed = math.max(0.01, math.min(16, tonumber(a.wave_speed) or 1))
+    r.speed = X.cue_effective_speed(a, X.now_pos())
     r.proj_seg = r.seg / r.speed
     local it = r.item
     if it and reaper.ValidatePtr2(PROJ, it, "MediaItem*") then
@@ -4295,6 +4352,51 @@ function X.accept_audio_file_drop_create(insert_index)
   return created
 end
 
+-- Active/désactive le reverse natif REAPER en enveloppant la source dans SOURCE SECTION.
+-- B_REVERSE n'est pas un attribut Take valide de l'API : le régler ne change donc rien.
+function X.set_item_reverse(item, reverse)
+  if not item or not reaper.GetItemStateChunk or not reaper.SetItemStateChunk then return false end
+  local ok, chunk = reaper.GetItemStateChunk(item, "", false)
+  if not ok or type(chunk) ~= "string" or chunk == "" then return false end
+
+  local source_start = chunk:find("<SOURCE SECTION", 1, true)
+  if source_start then
+    -- Déjà en SECTION : on conserve la source imbriquée et ne change que MODE.
+    local inner_start = chunk:find("<SOURCE WAVE", source_start, true)
+    if not inner_start then
+      -- Sources autres que WAVE : ne pas toucher à une structure inconnue.
+      return false
+    end
+    local inner_end = chunk:find("\n>", inner_start, true)
+    if not inner_end then return false end
+    local section_end = chunk:find("\n>", inner_end + 2, true)
+    if not section_end then return false end
+    local section = chunk:sub(source_start, section_end + 1)
+    if reverse then
+      local updated, n = section:gsub("MODE%s+[%-%d]+", "MODE 3", 1)
+      if n == 0 then updated = updated:gsub("(<SOURCE SECTION[^\n]*\n)", "%1LENGTH 0.000\nMODE 3\nSTARTPOS 0.000\nOVERLAP 0.010\n", 1) end
+      chunk = chunk:sub(1, source_start - 1) .. updated .. chunk:sub(section_end + 2)
+    else
+      -- Retire le wrapper SECTION et remet la source WAVE à sa place.
+      local inner = chunk:sub(inner_start, inner_end + 1)
+      chunk = chunk:sub(1, source_start - 1) .. inner .. chunk:sub(section_end + 2)
+    end
+  elseif reverse then
+    local wave_start = chunk:find("<SOURCE WAVE", 1, true)
+    if not wave_start then return false end
+    local wave_end = chunk:find("\n>", wave_start, true)
+    if not wave_end then return false end
+    local wave = chunk:sub(wave_start, wave_end + 1)
+    local wrapper = "<SOURCE SECTION\nLENGTH 0.000\nMODE 3\nSTARTPOS 0.000\nOVERLAP 0.010\n" .. wave .. "\n>"
+    chunk = chunk:sub(1, wave_start - 1) .. wrapper .. chunk:sub(wave_end + 2)
+  else
+    return true -- déjà en lecture normale
+  end
+  local set_ok = reaper.SetItemStateChunk(item, chunk, false)
+  if set_ok then reaper.UpdateItemInProject(item) end
+  return set_ok
+end
+
 function X.apply_wave_cue_props(a)
   if not a or not a.id then return end
   local gain_db = tonumber(a.wave_gain_db) or 0
@@ -4320,11 +4422,18 @@ function X.apply_wave_cue_props(a)
           local old_rate = reaper.GetMediaItemTakeInfo_Value(tk, "D_PLAYRATE")
           if not old_rate or old_rate <= 0 then old_rate = 1 end
           local old_len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
-          reaper.SetMediaItemTakeInfo_Value(tk, "D_PLAYRATE", speed)
+          local item_pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+          local effective_speed, tempo_ratio = X.cue_effective_speed(a, item_pos)
+          reaper.SetMediaItemTakeInfo_Value(tk, "D_PLAYRATE", effective_speed)
           reaper.SetMediaItemTakeInfo_Value(tk, "D_PITCH", pitch)
-          -- Conserver la portion de source de l'item (Li→Lo, Lo→OUT…) :
-          -- seule la durée projet change avec la vitesse.
-          reaper.SetMediaItemInfo_Value(it, "D_LENGTH", math.max(0.001, old_len * old_rate / speed))
+          reaper.SetMediaItemTakeInfo_Value(tk, "B_PPITCH", (a.wave_stretch_tempo and tempo_ratio ~= 1) and 1 or 0)
+          X.set_item_reverse(it, a.wave_reverse)
+          -- L'étirement au tempo est calculé explicitement depuis le BPM source.
+          -- C_AUTOSTRETCH reste désactivé pour éviter les artefacts sur les items internes.
+          reaper.SetMediaItemInfo_Value(it, "C_BEATATTACHMODE", 0)
+          reaper.SetMediaItemInfo_Value(it, "C_AUTOSTRETCH", 0)
+          -- Conserver la portion de source de l'item : la durée projet suit la vitesse effective.
+          reaper.SetMediaItemInfo_Value(it, "D_LENGTH", math.max(0.001, old_len * old_rate / effective_speed))
           reaper.UpdateItemInProject(it)
           changed = changed + 1
         end
@@ -4333,9 +4442,9 @@ function X.apply_wave_cue_props(a)
   end
   if runs[a.id] then
     local r = runs[a.id]
-    r.speed = speed
+    r.speed = X.cue_effective_speed(a, X.now_pos())
     r.seg = src_seg
-    r.proj_seg = proj_len
+    r.proj_seg = src_seg / r.speed
     if r.loop then X.replan_loop_run(a, r) end
   end
   if changed > 0 then reaper.UpdateArrange() end
@@ -4392,25 +4501,39 @@ end
 -- placée en bas de l'éditeur de forme d'onde.
 function X.draw_play_settings(a)
   reaper.ImGui_Separator(ctx)
-  if reaper.ImGui_CollapsingHeader(ctx, "Réglages de lecture (gain, pan, vitesse, pitch)##playset", nil,
+  if reaper.ImGui_CollapsingHeader(ctx, "Réglages de lecture (gain, pan, vitesse, pitch, reverse, tempo)##playset", nil,
       reaper.ImGui_TreeNodeFlags_DefaultOpen()) then
     local cg, gain_db = reaper.ImGui_SliderDouble(ctx, "Gain (dB)##wave_gain", a.wave_gain_db, -60, 12, "%.1f dB")
     if cg then a.wave_gain_db = gain_db; X.apply_wave_cue_props(a); X.save() end
     local cp, pan = reaper.ImGui_SliderDouble(ctx, "Pan##wave_pan", a.wave_pan, -1, 1, "%.2f")
     if cp then a.wave_pan = pan; X.apply_wave_cue_props(a); X.save() end
+    -- Mise en page en deux lignes : vitesse / pitch à gauche, options alignées à droite.
     reaper.ImGui_SetNextItemWidth(ctx, X.S(130))
     local cs, speed = reaper.ImGui_InputDouble(ctx, "Vitesse##wave_speed", a.wave_speed, 0.1, 0.5, "%.3f")
     if cs then a.wave_speed = math.max(0.01, math.min(16, speed)); X.apply_wave_cue_props(a); X.save() end
-    local cl, linked = reaper.ImGui_Checkbox(ctx, "Lier la hauteur à la vitesse##wave_pitch_link", a.wave_pitch_link)
-    if cl then a.wave_pitch_link = linked; X.apply_wave_cue_props(a); X.save() end
+    reaper.ImGui_SameLine(ctx)
+    local cst, stretch = reaper.ImGui_Checkbox(ctx, "Stretch au tempo##wave_stretch_tempo", a.wave_stretch_tempo)
+    if cst then a.wave_stretch_tempo = stretch; X.apply_wave_cue_props(a); X.save() end
+
     if not a.wave_pitch_link then
       reaper.ImGui_SetNextItemWidth(ctx, X.S(130))
       local cpi, pitch = reaper.ImGui_InputDouble(ctx, "Pitch (demi-tons)##wave_pitch", a.wave_pitch, 1, 4, "%.2f")
       if cpi then a.wave_pitch = math.max(-48, math.min(48, pitch)); X.apply_wave_cue_props(a); X.save() end
     else
+      reaper.ImGui_Text(ctx, "Pitch lié à la vitesse")
+      reaper.ImGui_SameLine(ctx)
       local linked_pitch = 12 * (math.log(math.max(0.01, a.wave_speed)) / math.log(2))
-      reaper.ImGui_TextDisabled(ctx, string.format("Hauteur liée : %+.2f demi-tons", linked_pitch))
+      reaper.ImGui_TextDisabled(ctx, string.format("%+.2f demi-tons", linked_pitch))
     end
+    reaper.ImGui_SameLine(ctx)
+    local cr, reverse = reaper.ImGui_Checkbox(ctx, "Reverse##wave_reverse", a.wave_reverse)
+    if cr then a.wave_reverse = reverse; X.apply_wave_cue_props(a); X.save() end
+
+    -- Le lien hauteur/vitesse est placé sur la ligne sous l'option Stretch.
+    reaper.ImGui_SetCursorPosX(ctx, X.S(205))
+    local cl, linked = reaper.ImGui_Checkbox(ctx, "Lier la hauteur à la vitesse##wave_pitch_link", a.wave_pitch_link)
+    if cl then a.wave_pitch_link = linked; X.apply_wave_cue_props(a); X.save() end
+    reaper.ImGui_TextDisabled(ctx, "Stretch : BPM source requis (métadonnées ou nom du fichier, ex. 120bpm). Sans BPM détecté, la vitesse reste inchangée.")
     reaper.ImGui_TextDisabled(ctx, "Ces réglages sont propres à cette cue et s'appliquent à ses items REAPER existants et aux prochaines lectures.")
   end
 end
@@ -4438,6 +4561,8 @@ function X.draw_wave_editor(a)
   a.wave_speed = tonumber(a.wave_speed) or 1
   a.wave_pitch = tonumber(a.wave_pitch) or 0
   a.wave_pitch_link = a.wave_pitch_link and true or false
+  a.wave_reverse = a.wave_reverse and true or false
+  a.wave_stretch_tempo = a.wave_stretch_tempo and true or false
   if reaper.ImGui_Button(ctx, "Remplacer le fichier...##wave_replace") then
     local ok, f = reaper.GetUserFileNameForRead(a.file, "Remplacer le fichier audio", "")
     if ok and f ~= "" then X.assign_audio_file(a, f) end
@@ -4596,13 +4721,19 @@ function X.draw_wave_editor(a)
   reaper.ImGui_DrawList_AddRectFilled(dl, x0, y0, x0+cw, yb0, 0x24382CFF)
   reaper.ImGui_DrawList_AddRectFilled(dl, x0, yb0, x0+cw, yb1, 0x202020FF)
 
-  -- Peaks adaptés à la fenêtre visible : au zoom, on rééchantillonne la zone affichée.
+  -- Peaks adaptés à la fenêtre visible. En Reverse, on lit la fenêtre source
+  -- miroir et on dessine ses colonnes de droite à gauche : seule la représentation
+  -- est inversée, sans modifier le fichier audio ni les données de peaks en cache.
   local px_count = math.max(1, math.floor(cw))
-  local view_peaks = X.get_wave_view(a.file, view_x, view_end, px_count)
+  local reverse_wave = a.wave_reverse == true
+  local peaks_t0 = reverse_wave and math.max(0, L - view_end) or view_x
+  local peaks_t1 = reverse_wave and math.max(0, L - view_x) or view_end
+  local view_peaks = X.get_wave_view(a.file, peaks_t0, peaks_t1, px_count)
   local mid = yb0 + hw/2
   if view_peaks and view_peaks.n and view_peaks.n > 0 then
     for px = 0, px_count - 1 do
-      local idx = 1 + math.floor((px / px_count) * (view_peaks.n - 1) + 0.5)
+      local col = math.floor((px / px_count) * (view_peaks.n - 1) + 0.5)
+      local idx = reverse_wave and (view_peaks.n - col) or (1 + col)
       if idx < 1 then idx = 1 elseif idx > view_peaks.n then idx = view_peaks.n end
       local mxv, mnv = view_peaks.max[idx], view_peaks.min[idx]
       if mxv then
@@ -4613,12 +4744,19 @@ function X.draw_wave_editor(a)
       end
     end
   else
-    -- Repli sur le cache global si l'échantillonage local échoue.
-    local idx_start = math.max(1, math.floor((view_x / L) * w.n))
-    local idx_end = math.min(w.n, math.floor((view_end / L) * w.n))
+    -- Repli sur le cache global si l'échantillonnage local échoue.
+    local idx_start, idx_end
+    if reverse_wave then
+      idx_start = math.max(1, math.floor(((L - view_end) / L) * w.n))
+      idx_end = math.min(w.n, math.floor(((L - view_x) / L) * w.n))
+    else
+      idx_start = math.max(1, math.floor((view_x / L) * w.n))
+      idx_end = math.min(w.n, math.floor((view_end / L) * w.n))
+    end
     local idx_span = math.max(1, idx_end - idx_start)
     for px = 0, px_count - 1 do
-      local idx = idx_start + math.floor((px / px_count) * idx_span)
+      local offset = math.floor((px / px_count) * idx_span)
+      local idx = reverse_wave and (idx_end - offset) or (idx_start + offset)
       local mxv, mnv = w.max[idx], w.min[idx]
       if mxv then
         local ya = mid - mxv * hw/2
