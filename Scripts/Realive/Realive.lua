@@ -1,23 +1,14 @@
 -- @description Realive — système de cues pour REAPER
--- @version 1.5.5
+-- @version 1.7
 -- @author joffo78-hash
--- @link https://buymeacoffee.com/joffo
+-- @link https://github.com/joffo78-hash/Realive
 -- @about
---   ☕ ReaLive vous est utile ?
---
---   ReaLive est développé pour faciliter la régie de spectacle vivant au sein de REAPER.
---
---   Si cet outil vous aide dans vos projets, vous pouvez soutenir son développement
---   en offrant un café à son créateur. Chaque contribution est appréciée et contribue
---   à faire évoluer le projet. Merci de faire vivre ReaLive !
---
---   Pour soutenir le projet, cliquez sur le bouton « Website » en bas à gauche.
---
+--   Realive est un système de cues de type QLab pour REAPER.
 --   Nécessite ReaImGui. Les fonctions OSC nécessitent Mavriq Lua Sockets.
 --
 -- ActionList.lua
 -- Playlist d'actions type QLab pour REAPER (ReaImGui)
--- Types : AUDIO (fichier), REGION, STOP, SNAPSHOT, OSC, MIDI
+-- Types : AUDIO (fichier), REGION, PRESET, STOP, SNAPSHOT, OSC, MIDI
 
 if not reaper.ImGui_CreateContext then
   reaper.MB("ReaImGui n'est pas installé.\nInstallez-le via ReaPack.", "ActionList", 0)
@@ -279,6 +270,7 @@ function X.rebuild_id_map()
     for _, a in ipairs(tab.actions or {}) do
       actions_by_id[a.id] = a
       actions_by_id[tostring(a.id)] = a
+      if X.ensure_presets and a.type == "audio" then X.ensure_presets(a) end
       local numeric_id = tonumber(a.id)
       if numeric_id then actions_by_id[numeric_id] = a end
     end
@@ -705,6 +697,10 @@ end
 function X.add_file_item(dest, file, pos, tin, seg, fadein, gain, id, markers)
   local src = reaper.PCM_Source_CreateFromFile(file)
   if not src then return nil end
+  -- IMPORTANT : lire la longueur de la source TANT QU'ELLE EST VALIDE. Après
+  -- SetMediaItemTake_Source puis SetItemStateChunk (inversion, voir set_item_reverse),
+  -- REAPER reconstruit take + source : le pointeur `src` devient invalide.
+  local src_len = reaper.GetMediaSourceLength(src)
   local new = reaper.AddMediaItemToTrack(dest)
   local ntk = reaper.AddTakeToMediaItem(new)
   reaper.SetMediaItemTake_Source(ntk, src)
@@ -724,12 +720,21 @@ function X.add_file_item(dest, file, pos, tin, seg, fadein, gain, id, markers)
     -- Le tempo est appliqué par un ratio de lecture calculé depuis le BPM source.
     -- On évite C_AUTOSTRETCH sur les items de lecture temps réel : sans BPM source,
     -- REAPER peut produire un étirement invalide sur ces items courts/recoupés.
-    reaper.SetMediaItemTakeInfo_Value(ntk, "B_PPITCH", (cue.wave_stretch_tempo and tempo_ratio ~= 1) and 1 or 0)
+    -- Comportement d'origine ; la hauteur n'est préservée que si la vitesse est
+    -- modifiée SANS liaison hauteur/vitesse (sinon la liaison serait toujours active).
+    local keep_pitch = (cue.wave_stretch_tempo and tempo_ratio ~= 1)
+      or (not cue.wave_pitch_link and math.abs(speed - 1) > 1e-6)
+    reaper.SetMediaItemTakeInfo_Value(ntk, "B_PPITCH", keep_pitch and 1 or 0)
     local pitch = tonumber(cue.wave_pitch) or 0
     if cue.wave_pitch_link then pitch = 12 * (math.log(speed) / math.log(2)) end
     reaper.SetMediaItemTakeInfo_Value(ntk, "D_PITCH", pitch)
     -- L'inversion est portée par la source SECTION native de REAPER.
-    if X.set_item_reverse then X.set_item_reverse(new, cue.wave_reverse) end
+    if X.set_item_reverse then
+      X.set_item_reverse(new, cue.wave_reverse)
+      -- SetItemStateChunk reconstruit les takes : l'ancien pointeur `ntk` (et `src`)
+      -- ne doit plus être utilisé. On récupère le take courant.
+      ntk = reaper.GetActiveTake(new) or ntk
+    end
     -- L'adaptation initiale est calculée explicitement depuis le BPM source ;
     -- ne pas activer C_AUTOSTRETCH sur les items internes de ReaLive.
     reaper.SetMediaItemInfo_Value(new, "C_BEATATTACHMODE", 0)
@@ -739,7 +744,25 @@ function X.add_file_item(dest, file, pos, tin, seg, fadein, gain, id, markers)
   reaper.SetMediaItemInfo_Value(new, "D_POSITION", pos)
   reaper.SetMediaItemInfo_Value(new, "D_LENGTH", proj_len)
   reaper.SetMediaItemInfo_Value(new, "D_FADEINLEN", math.min(fadein or 0, proj_len))
-  reaper.SetMediaItemInfo_Value(new, "D_FADEOUTLEN", 0)
+  -- Fondu de fin de cue : uniquement sur l'item qui atteint OUT (jamais sur les cycles de boucle).
+  local fo_len = 0
+  if cue then
+    local tout_c = tonumber(cue.outpt)
+    local lo_c = tonumber(cue.loop_out) or tout_c
+    -- Fin de référence = OUT, borné par la vraie longueur de la source (OUT peut dépasser de
+    -- quelques ms à cause des arrondis) ; tolérance de 20 ms.
+    local full_len = src_len
+    local end_ref = tout_c or full_len
+    if full_len and full_len > 0 then end_ref = math.min(end_ref or full_len, full_len) end
+    local ends_at_out = end_ref and ((tonumber(tin) or 0) + (tonumber(seg) or 0)) >= end_ref - 0.02
+    local is_cycle = cue.loop and lo_c and (tonumber(tin) or 0) < lo_c - 1e-3
+    if ends_at_out and not is_cycle then
+      fo_len = math.max(0, math.min(tonumber(cue.fadeout) or 0, proj_len))
+    end
+    reaper.SetMediaItemInfo_Value(new, "D_FADEINDIR", X.fade_dir_clamp(cue.fadein_dir) * X.FADEIN_DIR_SIGN)
+    reaper.SetMediaItemInfo_Value(new, "D_FADEOUTDIR", X.fade_dir_clamp(cue.fadeout_dir) * X.FADEOUT_DIR_SIGN)
+  end
+  reaper.SetMediaItemInfo_Value(new, "D_FADEOUTLEN", fo_len)
   -- Courbe native REAPER : 0 linéaire, valeurs croissantes = formes plus marquées.
   local curve_shape = math.max(0, math.min(6, math.floor((tonumber(cue and cue.fade_curve) or 0) * 6 + 0.5)))
   reaper.SetMediaItemInfo_Value(new, "D_FADEINSHAPE", curve_shape)
@@ -1875,6 +1898,8 @@ function X.fire_cue(a, from_chain)
   elseif from_file then
     a.src = "file"
   end
+  -- Réglages de lecture = preset rappelé avec la cue (0 par défaut).
+  if from_file then X.preset_recall_on_fire(a) end
   local lib, reg
 
   if from_file then
@@ -2468,8 +2493,8 @@ function X.fire_stop(a)
   -- Le champ Q1,Q8 est la source de vérité lorsqu'il est présent.
   if type(a.targets_text) == "string" then
     local parsed, seen, invalid = {}, {}, false
-    for token in (a.targets_text .. ","):gmatch("(.-),") do
-      token = token:match("^%s*(.-)%s*$")
+    for raw_token in (a.targets_text .. ","):gmatch("(.-),") do
+      local token = raw_token:match("^%s*(.-)%s*$")
       if token ~= "" then
         local digits = token:match("^[Qq]?(%d+)$")
         if digits then
@@ -3112,6 +3137,7 @@ function X.process_jobs()
     end
   end
   X.process_runs(now)
+  X.process_preset_morphs(now)
   X.process_ext(now)
   X.refresh_active(now)
   X.process_take_markers(now)
@@ -3273,12 +3299,277 @@ function X.process_jobs()
   end
 end
 
+---------------------------------------------------------------- FONDUS (début / fin de cue)
+-- a.fadein / a.fadeout : durées en secondes PROJET ; a.fadein_dir / a.fadeout_dir : courbure -1..1
+-- (0 = linéaire ; > 0 = montée rapide, type logarithmique ; < 0 = montée lente, type exponentielle).
+-- La courbure est transmise à REAPER via D_FADEINDIR / D_FADEOUTDIR. Si la courbe réelle de l'item
+-- dans REAPER est inversée par rapport à celle affichée dans l'éditeur, inverser le signe de la constante correspondante (fade in / fade out).
+X.FADEIN_DIR_SIGN = -1  -- fade in : sens inversé par rapport au dessin
+X.FADEOUT_DIR_SIGN = 1  -- fade out : sens déjà correct
+
+function X.fade_dir_clamp(d) return math.max(-1, math.min(1, tonumber(d) or 0)) end
+
+-- Gain (0..1) au point u (0..1) d'un fondu montant de courbure d.
+function X.fade_curve_gain(u, d)
+  u = math.max(0, math.min(1, u))
+  if u <= 0 then return 0 end
+  return u ^ (2 ^ (-2 * X.fade_dir_clamp(d)))
+end
+
+---------------------------------------------------------------- PRESETS (réglages de lecture)
+-- Un preset = jeu de réglages de lecture d'une cue AUDIO (gain, pan, vitesse, pitch,
+-- lien hauteur/vitesse, reverse, stretch au tempo). Les valeurs "actives" restent dans
+-- a.wave_* (utilisées par le moteur) ; les presets sont stockés dans a.presets.
+--   a.presets[i] = {id=, name=, gain=, pan=, speed=, pitch=, pitch_link=, reverse=, stretch=}
+--   a.preset_edit   = preset affiché / édité dans l'éditeur
+--   a.preset_recall = preset rappelé à chaque lancement de la cue (0 par défaut)
+X.pmorphs = {} -- transitions de presets en cours (runtime)
+
+function X.preset_vals_from_cue(a)
+  return {
+    gain = tonumber(a.wave_gain_db) or 0,
+    pan = tonumber(a.wave_pan) or 0,
+    speed = tonumber(a.wave_speed) or 1,
+    pitch = tonumber(a.wave_pitch) or 0,
+    pitch_link = a.wave_pitch_link and true or false,
+    reverse = a.wave_reverse and true or false,
+    stretch = a.wave_stretch_tempo and true or false,
+  }
+end
+
+function X.preset_norm(p)
+  p.gain = math.max(-60, math.min(12, tonumber(p.gain) or 0))
+  p.pan = math.max(-1, math.min(1, tonumber(p.pan) or 0))
+  p.speed = math.max(0.01, math.min(16, tonumber(p.speed) or 1))
+  p.pitch = math.max(-48, math.min(48, tonumber(p.pitch) or 0))
+  p.pitch_link = p.pitch_link and true or false
+  p.reverse = p.reverse and true or false
+  p.stretch = p.stretch and true or false
+  return p
+end
+
+function X.preset_by_id(a, id)
+  id = tonumber(id)
+  if id == nil or type(a) ~= "table" or type(a.presets) ~= "table" then return nil end
+  for _, p in ipairs(a.presets) do
+    if p.id == id then return p end
+  end
+  return nil
+end
+
+-- Garantit que la cue audio possède au moins le preset 0 (créé depuis ses réglages actuels).
+function X.ensure_presets(a)
+  if not (a and a.type == "audio") then return end
+  if type(a.presets) ~= "table" or #a.presets == 0 then
+    local p = X.preset_vals_from_cue(a)
+    p.id, p.name = 0, "Défaut"
+    a.presets = {p}
+    a.preset_next = 1
+    a.preset_edit, a.preset_recall = 0, 0
+  end
+  local maxid = -1
+  for _, p in ipairs(a.presets) do
+    p.id = tonumber(p.id) or 0
+    X.preset_norm(p)
+    p.name = tostring(p.name or ("Preset " .. p.id))
+    if p.id > maxid then maxid = p.id end
+  end
+  a.preset_next = math.max(tonumber(a.preset_next) or 0, maxid + 1)
+  if not X.preset_by_id(a, a.preset_edit) then a.preset_edit = a.presets[1].id end
+  if not X.preset_by_id(a, a.preset_recall) then
+    a.preset_recall = X.preset_by_id(a, 0) and 0 or a.presets[1].id
+  end
+end
+
+-- Copie les valeurs d'un preset dans les réglages actifs de la cue.
+function X.preset_copy_to_cue(a, v)
+  a.wave_gain_db = v.gain
+  a.wave_pan = v.pan
+  a.wave_speed = v.speed
+  a.wave_pitch = v.pitch
+  a.wave_pitch_link = v.pitch_link
+  a.wave_reverse = v.reverse
+  a.wave_stretch_tempo = v.stretch
+end
+
+-- Active un preset immédiatement (réglages actifs + items REAPER déjà posés).
+function X.preset_activate(a, p)
+  X.preset_copy_to_cue(a, p)
+  X.apply_wave_cue_props(a)
+end
+
+function X.preset_cancel_morph(id)
+  for i = #X.pmorphs, 1, -1 do
+    if tostring(X.pmorphs[i].id) == tostring(id) then table.remove(X.pmorphs, i) end
+  end
+end
+
+-- Au lancement d'une cue : réglages actifs = preset rappelé (0 par défaut).
+function X.preset_recall_on_fire(a)
+  X.ensure_presets(a)
+  X.preset_cancel_morph(a.id)
+  local p = X.preset_by_id(a, a.preset_recall)
+  if p then
+    X.preset_copy_to_cue(a, p)
+    a.preset_edit = p.id -- l'éditeur affiche le preset réellement actif
+  end
+end
+
+function X.preset_eff_speed(a, v, pos)
+  return (X.cue_effective_speed({wave_speed = v.speed, wave_stretch_tempo = v.stretch, file = a.file}, pos))
+end
+
+function X.preset_start_morph(a, p, dur)
+  X.preset_cancel_morph(a.id)
+  a.preset_edit = p.id -- l'éditeur affiche le preset rappelé
+  if dur <= 0 then
+    X.preset_activate(a, p)
+    return
+  end
+  local from = X.preset_vals_from_cue(a)
+  -- Reverse, stretch et lien hauteur/vitesse basculent dès le début de la transition.
+  if from.reverse ~= p.reverse or from.stretch ~= p.stretch or from.pitch_link ~= p.pitch_link then
+    local pos = X.now_pos()
+    local es0 = X.preset_eff_speed(a, from, pos)
+    local ratio_t = X.preset_eff_speed(a, p, pos) / p.speed
+    a.wave_reverse, a.wave_stretch_tempo, a.wave_pitch_link = p.reverse, p.stretch, p.pitch_link
+    a.wave_speed = es0 / ratio_t -- vitesse effective inchangée au moment du basculement
+    X.apply_wave_cue_props(a)
+  end
+  X.pmorphs[#X.pmorphs + 1] = {
+    id = a.id, t0 = reaper.time_precise(), dur = dur,
+    from = from, to = X.clone_table(p),
+  }
+end
+
+-- Applique les valeurs intermédiaires aux items de la cue en cours de lecture.
+function X.preset_push_live(a, r, es, pitch, do_rate)
+  local dest = X.find_track(r.dest_guid)
+  if not dest then return end
+  local p_now = X.now_pos()
+  local lin = 10 ^ ((tonumber(a.wave_gain_db) or 0) / 20)
+  local pan = math.max(-1, math.min(1, tonumber(a.wave_pan) or 0))
+  local skip_gain = (r.fade_out_end ~= nil) or r.paused
+  r.speed = es
+  X.cue_audio_items(dest, r.id, function(it, tk)
+    local so = reaper.GetMediaItemTakeInfo_Value(tk, "D_STARTOFFS") or 0
+    if not skip_gain then
+      local e = (r.env and #r.env > 0) and X.env_gain(r.env, so) or 1
+      reaper.SetMediaItemTakeInfo_Value(tk, "D_VOL", e * lin)
+    end
+    reaper.SetMediaItemTakeInfo_Value(tk, "D_PAN", pan)
+    if not do_rate then
+      reaper.UpdateItemInProject(it)
+      return
+    end
+    -- Hauteur et vitesse : réécrites seulement si le changement est audible
+    -- (chaque écriture sur un item en lecture force REAPER à resynchroniser).
+    if not a.wave_pitch_link and (reaper.GetMediaItemTakeInfo_Value(tk, "B_PPITCH") or 0) < 1 then
+      reaper.SetMediaItemTakeInfo_Value(tk, "B_PPITCH", 1)
+    end
+    local cur_pitch = reaper.GetMediaItemTakeInfo_Value(tk, "D_PITCH") or 0
+    if math.abs(cur_pitch - pitch) > 0.02 then
+      reaper.SetMediaItemTakeInfo_Value(tk, "D_PITCH", pitch)
+    end
+    local old_rate = reaper.GetMediaItemTakeInfo_Value(tk, "D_PLAYRATE")
+    if not old_rate or old_rate <= 0 then old_rate = 1 end
+    if math.abs(es / old_rate - 1) > 5e-4 then
+      local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+      local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
+      -- Seul l'item en cours de lecture est modifié pendant la transition ;
+      -- le reste est recalé à la fin (apply_wave_cue_props + replan de boucle).
+      if pos <= p_now and pos + len > p_now then
+        local new_so = so
+        if not a.wave_reverse then
+          -- Garde la position source continue à l'instant présent (pas de saut audible).
+          local src_now = so + (p_now - pos) * old_rate
+          new_so = src_now - (p_now - pos) * es
+        end
+        local src_end = so + len * old_rate
+        reaper.SetMediaItemTakeInfo_Value(tk, "D_STARTOFFS", new_so)
+        reaper.SetMediaItemTakeInfo_Value(tk, "D_PLAYRATE", es)
+        reaper.SetMediaItemInfo_Value(it, "D_LENGTH", math.max(0.001, (src_end - new_so) / es))
+      end
+    end
+    reaper.UpdateItemInProject(it)
+  end)
+end
+
+function X.process_preset_morphs(now)
+  if #X.pmorphs == 0 then return end
+  local log2 = math.log(2)
+  for i = #X.pmorphs, 1, -1 do
+    local m = X.pmorphs[i]
+    local a = actions_by_id[m.id] or actions_by_id[tostring(m.id)]
+    local r = runs[m.id] or runs[tostring(m.id)]
+    if not a or not r or not r.alive then
+      table.remove(X.pmorphs, i) -- cue arrêtée : transition abandonnée
+    else
+      local p = math.min(1, (now - m.t0) / math.max(0.001, m.dur))
+      if p >= 1 then
+        table.remove(X.pmorphs, i)
+        X.preset_copy_to_cue(a, m.to)
+        X.apply_wave_cue_props(a)
+      else
+        local f, t = m.from, m.to
+        local pos = X.now_pos()
+        local es0 = X.preset_eff_speed(a, f, pos)
+        local es1 = X.preset_eff_speed(a, t, pos)
+        local es = es0 * ((es1 / es0) ^ p)
+        local pf = f.pitch_link and (12 * math.log(es0) / log2) or f.pitch
+        local pt = t.pitch_link and (12 * math.log(es1) / log2) or t.pitch
+        local pitch = pf + (pt - pf) * p
+        -- Réglages actifs interpolés : les items planifiés pendant la transition les reprennent.
+        a.wave_gain_db = f.gain + (t.gain - f.gain) * p
+        a.wave_pan = f.pan + (t.pan - f.pan) * p
+        a.wave_speed = es / (es1 / t.speed) -- vitesse effective = es avec le stretch cible
+        a.wave_pitch = f.pitch + (t.pitch - f.pitch) * p
+        a.wave_stretch_tempo, a.wave_pitch_link, a.wave_reverse = t.stretch, t.pitch_link, t.reverse
+        local do_rate = (now - (m.last_rate or 0)) >= 0.06
+        if do_rate then m.last_rate = now end
+        X.preset_push_live(a, r, es, pitch, do_rate)
+      end
+    end
+  end
+  reaper.UpdateArrange()
+end
+
+-- Action PRESET : rappelle le preset N des cues AUDIO ciblées (en cours de lecture),
+-- avec un temps de transition.
+function X.fire_preset(a)
+  local pid = math.max(0, math.floor(tonumber(a.preset_id) or 0))
+  local dur = math.max(0, tonumber(a.dur) or 0)
+  local n, idle, missing, seen = 0, 0, {}, {}
+  for _, id in ipairs(X.target_run_ids(a)) do
+    local cue = actions_by_id[id] or actions_by_id[tostring(id)]
+    if cue and X.is_file_cue(cue) and not seen[cue.id] then
+      seen[cue.id] = true
+      X.ensure_presets(cue)
+      local p = X.preset_by_id(cue, pid)
+      local r = runs[cue.id] or runs[tostring(cue.id)]
+      if not p then
+        missing[#missing + 1] = "Q" .. tostring(cue.id)
+      elseif r and r.alive then
+        X.preset_start_morph(cue, p, dur)
+        n = n + 1
+      else
+        idle = idle + 1
+      end
+    end
+  end
+  status = string.format("PRESET %d : %d cue(s) concernée(s)%s%s%s.", pid, n,
+    dur > 0 and string.format(", transition %.1f s", dur) or "",
+    idle > 0 and string.format(" — %d cue(s) non jouée(s) ignorée(s)", idle) or "",
+    #missing > 0 and (" — preset introuvable pour " .. table.concat(missing, ", ")) or "")
+end
+
 ---------------------------------------------------------------- Fire
 X.fire = function(a, from_auto_chain)
   if not a then return end
   -- Toute action déclenchée manuellement remplace le compte à rebours précédent.
   if not from_auto_chain then auto_chain = nil end
   if X.is_playable_cue(a) then X.fire_cue(a, from_auto_chain)
+  elseif a.type == "preset"   then X.fire_preset(a)
   elseif a.type == "snapshot" then X.fire_snapshot(a)
   elseif a.type == "stop"   then X.fire_stop(a)
   elseif a.type == "pause"  then X.fire_pause(a)
@@ -3325,7 +3616,7 @@ X.fire = function(a, from_auto_chain)
         elseif a.type == "stop" then
           -- Pour STOP, la fin correspond à la fin de son fondu.
           wait_until = now + math.max(0, tonumber(a.dur) or tonumber(stop_fade) or 0)
-        elseif a.type == "pause" then
+        elseif a.type == "pause" or a.type == "preset" then
           wait_until = now + math.max(0, tonumber(a.dur) or 0)
         else
           -- Snapshot / OSC / MIDI : action instantanée, puis DELAY.
@@ -3622,7 +3913,7 @@ function X.go_selected()
   end
 end
 
-X.TYPE_LABEL = {audio="AUDIO", region="REGION", snapshot="SNAPSHOT", stop="STOP", pause="PAUSE", devamp="DEVAMP", osc="OSC", midi="MIDI"}
+X.TYPE_LABEL = {audio="AUDIO", region="REGION", preset="PRESET", snapshot="SNAPSHOT", stop="STOP", pause="PAUSE", devamp="DEVAMP", osc="OSC", midi="MIDI"}
 
 -- Cues jouables : fichier audio (type audio) ou région (type region).
 function X.is_playable_cue(a)
@@ -3654,6 +3945,11 @@ function X.normalize_action(a)
     a.src = "region"
   elseif a.type == "audio" then
     a.src = "file"
+  end
+  if a.type == "audio" then X.ensure_presets(a) end
+  if a.type == "preset" then
+    a.preset_id = math.max(0, math.floor(tonumber(a.preset_id) or 0))
+    a.dur = math.max(0, tonumber(a.dur) or 0)
   end
   return a
 end
@@ -3688,16 +3984,18 @@ X.default_track_guid = function()
 end
 
 function X.add_action(t)
-  local names = {audio="Audio", region="Region", snapshot="Snapshot", stop="Stop cues", pause="Pause", devamp="Devamp", osc="OSC", midi="MIDI"}
+  local names = {audio="Audio", region="Region", preset="Preset", snapshot="Snapshot", stop="Stop cues", pause="Pause", devamp="Devamp", osc="OSC", midi="MIDI"}
   local a = {id = next_id, type = t, name = names[t].." "..next_id}
   if t == "audio" or t == "cue" then
     a.type = "audio"
     a.src = "file"; a.fadein = 0; a.track = X.default_track_guid()
+    X.ensure_presets(a) -- crée le preset 0
   end
   if t == "region" then
     a.src = "region"; a.fadein = 0; a.track = nil; a.copy = false
   end
   if t == "stop" then a.dur = 0.0 end
+  if t == "preset" then a.preset_id = 0; a.dur = 0.0 end
   if t == "pause" then a.dur = 0.5; a.unpause = false end
   if t == "snapshot" then
     a.type = "snapshot"
@@ -4435,7 +4733,9 @@ function X.apply_wave_cue_props(a)
           local effective_speed, tempo_ratio = X.cue_effective_speed(a, item_pos)
           reaper.SetMediaItemTakeInfo_Value(tk, "D_PLAYRATE", effective_speed)
           reaper.SetMediaItemTakeInfo_Value(tk, "D_PITCH", pitch)
-          reaper.SetMediaItemTakeInfo_Value(tk, "B_PPITCH", (a.wave_stretch_tempo and tempo_ratio ~= 1) and 1 or 0)
+          local keep_pitch = (a.wave_stretch_tempo and tempo_ratio ~= 1)
+            or (not a.wave_pitch_link and math.abs(effective_speed - 1) > 1e-6)
+          reaper.SetMediaItemTakeInfo_Value(tk, "B_PPITCH", keep_pitch and 1 or 0)
           X.set_item_reverse(it, a.wave_reverse)
           -- L'étirement au tempo est calculé explicitement depuis le BPM source.
           -- C_AUTOSTRETCH reste désactivé pour éviter les artefacts sur les items internes.
@@ -4509,42 +4809,178 @@ end
 -- Réglages de lecture (gain / pan / vitesse / pitch) : section repliable,
 -- placée en bas de l'éditeur de forme d'onde.
 function X.draw_play_settings(a)
+  X.ensure_presets(a)
+  local p = X.preset_by_id(a, a.preset_edit)
   reaper.ImGui_Separator(ctx)
   if reaper.ImGui_CollapsingHeader(ctx, "Réglages de lecture (gain, pan, vitesse, pitch, reverse, tempo)##playset", nil,
       reaper.ImGui_TreeNodeFlags_DefaultOpen()) then
-    local cg, gain_db = reaper.ImGui_SliderDouble(ctx, "Gain (dB)##wave_gain", a.wave_gain_db, -60, 12, "%.1f dB")
-    if cg then a.wave_gain_db = gain_db; X.apply_wave_cue_props(a); X.save() end
-    local cp, pan = reaper.ImGui_SliderDouble(ctx, "Pan##wave_pan", a.wave_pan, -1, 1, "%.2f")
-    if cp then a.wave_pan = pan; X.apply_wave_cue_props(a); X.save() end
-    -- Mise en page en deux lignes : vitesse / pitch à gauche, options alignées à droite.
-    reaper.ImGui_SetNextItemWidth(ctx, X.S(130))
-    local cs, speed = reaper.ImGui_InputDouble(ctx, "Vitesse##wave_speed", a.wave_speed, 0.1, 0.5, "%.3f")
-    if cs then a.wave_speed = math.max(0.01, math.min(16, speed)); X.apply_wave_cue_props(a); X.save() end
-    reaper.ImGui_SameLine(ctx)
-    local cst, stretch = reaper.ImGui_Checkbox(ctx, "Stretch au tempo##wave_stretch_tempo", a.wave_stretch_tempo)
-    if cst then a.wave_stretch_tempo = stretch; X.apply_wave_cue_props(a); X.save() end
+    -- Les curseurs éditent le preset sélectionné dans la boîte de droite.
+    local function commit()
+      X.preset_norm(p)
+      X.preset_activate(a, p)
+      X.save()
+    end
 
-    if not a.wave_pitch_link then
+    reaper.ImGui_BeginGroup(ctx)
+    reaper.ImGui_SetNextItemWidth(ctx, X.S(200))
+    local cg, gain_db = reaper.ImGui_SliderDouble(ctx, "Gain (dB)##wave_gain", p.gain, -60, 12, "%.1f dB")
+    if cg then p.gain = gain_db; commit() end
+    reaper.ImGui_SetNextItemWidth(ctx, X.S(200))
+    local cp, pan = reaper.ImGui_SliderDouble(ctx, "Pan##wave_pan", p.pan, -1, 1, "%.2f")
+    if cp then p.pan = pan; commit() end
+    reaper.ImGui_SetNextItemWidth(ctx, X.S(130))
+    local cs, speed = reaper.ImGui_InputDouble(ctx, "Vitesse##wave_speed", p.speed, 0.1, 0.5, "%.3f")
+    if cs then p.speed = speed; commit() end
+    reaper.ImGui_SameLine(ctx)
+    local cst, stretch = reaper.ImGui_Checkbox(ctx, "Stretch au tempo##wave_stretch_tempo", p.stretch)
+    if cst then p.stretch = stretch; commit() end
+
+    if not p.pitch_link then
       reaper.ImGui_SetNextItemWidth(ctx, X.S(130))
-      local cpi, pitch = reaper.ImGui_InputDouble(ctx, "Pitch (demi-tons)##wave_pitch", a.wave_pitch, 1, 4, "%.2f")
-      if cpi then a.wave_pitch = math.max(-48, math.min(48, pitch)); X.apply_wave_cue_props(a); X.save() end
+      local cpi, pitch = reaper.ImGui_InputDouble(ctx, "Pitch (demi-tons)##wave_pitch", p.pitch, 1, 4, "%.2f")
+      if cpi then p.pitch = pitch; commit() end
     else
       reaper.ImGui_Text(ctx, "Pitch lié à la vitesse")
       reaper.ImGui_SameLine(ctx)
-      local linked_pitch = 12 * (math.log(math.max(0.01, a.wave_speed)) / math.log(2))
+      local linked_pitch = 12 * (math.log(math.max(0.01, p.speed)) / math.log(2))
       reaper.ImGui_TextDisabled(ctx, string.format("%+.2f demi-tons", linked_pitch))
     end
     reaper.ImGui_SameLine(ctx)
-    local cr, reverse = reaper.ImGui_Checkbox(ctx, "Reverse##wave_reverse", a.wave_reverse)
-    if cr then a.wave_reverse = reverse; X.apply_wave_cue_props(a); X.save() end
+    local cr, reverse = reaper.ImGui_Checkbox(ctx, "Reverse##wave_reverse", p.reverse)
+    if cr then p.reverse = reverse; commit() end
 
-    -- Le lien hauteur/vitesse est placé sur la ligne sous l'option Stretch.
-    reaper.ImGui_SetCursorPosX(ctx, X.S(205))
-    local cl, linked = reaper.ImGui_Checkbox(ctx, "Lier la hauteur à la vitesse##wave_pitch_link", a.wave_pitch_link)
-    if cl then a.wave_pitch_link = linked; X.apply_wave_cue_props(a); X.save() end
+    local cl, linked = reaper.ImGui_Checkbox(ctx, "Lier la hauteur à la vitesse##wave_pitch_link", p.pitch_link)
+    if cl then p.pitch_link = linked; commit() end
+    reaper.ImGui_EndGroup(ctx)
+
+    -- Boîte des presets, à côté des réglages.
+    reaper.ImGui_SameLine(ctx, 0, X.S(24))
+    reaper.ImGui_BeginGroup(ctx)
+    reaper.ImGui_Text(ctx, "Presets")
+    local bw, bh = X.S(210), X.S(96)
+    local bx, by = reaper.ImGui_GetCursorScreenPos(ctx)
+    if reaper.ImGui_BeginChild(ctx, "##presetbox", bw, bh) then
+      for _, q in ipairs(a.presets) do
+        local label = string.format("%d · %s%s##pre%d", q.id, q.name,
+          (q.id == a.preset_recall) and "   ▶" or "", q.id)
+        if reaper.ImGui_Selectable(ctx, label, q.id == a.preset_edit) then
+          a.preset_edit = q.id
+          X.preset_activate(a, q)
+          X.save()
+        end
+      end
+      reaper.ImGui_EndChild(ctx)
+    end
+    reaper.ImGui_DrawList_AddRect(reaper.ImGui_GetWindowDrawList(ctx), bx, by, bx + bw, by + bh, 0xFF777777, 0, 0, X.S(1))
+
+    if reaper.ImGui_Button(ctx, "Ajouter##preset_add") then
+      local np = X.clone_table(p)
+      np.id = a.preset_next
+      a.preset_next = a.preset_next + 1
+      np.name = "Preset " .. np.id
+      a.presets[#a.presets + 1] = np
+      a.preset_edit = np.id
+      X.save()
+      status = "Preset " .. np.id .. " ajouté (copie de " .. p.id .. ")."
+    end
+    reaper.ImGui_SameLine(ctx)
+    if reaper.ImGui_Button(ctx, "Modifier##preset_rename_btn") then
+      X.preset_rename = {id = a.id, buf = p.name, focus = true}
+      reaper.ImGui_OpenPopup(ctx, "Renommer le preset##preset_rename")
+    end
+    reaper.ImGui_SameLine(ctx)
+    if reaper.ImGui_Button(ctx, "Supprimer##preset_del") then
+      if #a.presets <= 1 then
+        status = "Impossible de supprimer le dernier preset de la cue."
+      else
+        for k, q in ipairs(a.presets) do
+          if q.id == p.id then table.remove(a.presets, k); break end
+        end
+        a.preset_edit = a.presets[1].id
+        if not X.preset_by_id(a, a.preset_recall) then a.preset_recall = a.presets[1].id end
+        X.save()
+        status = "Preset " .. p.id .. " supprimé."
+      end
+    end
+
+    if reaper.ImGui_BeginPopup(ctx, "Renommer le preset##preset_rename") then
+      local rn = X.preset_rename
+      if rn and rn.id == a.id then
+        if rn.focus then reaper.ImGui_SetKeyboardFocusHere(ctx); rn.focus = false end
+        local cn, nv = reaper.ImGui_InputText(ctx, "Nom##preset_name_in", rn.buf)
+        if cn then rn.buf = nv end
+        if reaper.ImGui_Button(ctx, "Valider##preset_name_ok") then
+          local nm = tostring(rn.buf or ""):match("^%s*(.-)%s*$")
+          if nm ~= "" then p.name = nm; X.save() end
+          X.preset_rename = nil
+          reaper.ImGui_CloseCurrentPopup(ctx)
+        end
+        reaper.ImGui_SameLine(ctx)
+        if reaper.ImGui_Button(ctx, "Annuler##preset_name_cancel") then
+          X.preset_rename = nil
+          reaper.ImGui_CloseCurrentPopup(ctx)
+        end
+      else
+        reaper.ImGui_CloseCurrentPopup(ctx)
+      end
+      reaper.ImGui_EndPopup(ctx)
+    end
+
+    reaper.ImGui_Text(ctx, "Rappelé au lancement :")
+    reaper.ImGui_SetNextItemWidth(ctx, bw)
+    local rp = X.preset_by_id(a, a.preset_recall)
+    if reaper.ImGui_BeginCombo(ctx, "##preset_recall", rp and (rp.id .. " · " .. rp.name) or "?") then
+      for _, q in ipairs(a.presets) do
+        if reaper.ImGui_Selectable(ctx, q.id .. " · " .. q.name .. "##rc" .. q.id, q.id == a.preset_recall) then
+          a.preset_recall = q.id
+          X.save()
+        end
+      end
+      reaper.ImGui_EndCombo(ctx)
+    end
+    reaper.ImGui_EndGroup(ctx)
+
+    reaper.ImGui_TextDisabled(ctx, "Les réglages ci-dessus modifient le preset sélectionné. ▶ = preset rappelé à chaque lancement de la cue (par défaut 0).")
     reaper.ImGui_TextDisabled(ctx, "Stretch : BPM source requis (métadonnées ou nom du fichier, ex. 120bpm). Sans BPM détecté, la vitesse reste inchangée.")
-    reaper.ImGui_TextDisabled(ctx, "Ces réglages sont propres à cette cue et s'appliquent à ses items REAPER existants et aux prochaines lectures.")
+    reaper.ImGui_TextDisabled(ctx, "Une action PRESET (+ Preset) peut rappeler un autre preset sur une cue en cours de lecture, avec une transition.")
   end
+end
+
+-- Géométrie des poignées de fondu superposées à la forme d'onde (du bas jusqu'à la ligne jaune 0 dB).
+function X.fade_geometry(a, tx, view_w, cw, yb0, yb1)
+  local g = {}
+  g.gy0 = yb1 - X.g_to_frac(1) * (yb1 - yb0) -- gain 1 = niveau de la ligne jaune (0 dB)
+  g.gy1 = yb1 - X.S(4)                       -- gain 0 (bas de la forme d'onde)
+  g.gh = math.max(1, g.gy1 - g.gy0)
+  g.sp = math.max(0.01, (X.cue_effective_speed(a, 0)))
+  g.seg_src = math.max(0.05, (tonumber(a.outpt) or 0) - (tonumber(a.inpt) or 0))
+  g.fin_src = math.min(g.seg_src, math.max(0, tonumber(a.fadein) or 0) * g.sp)
+  g.fout_src = math.min(g.seg_src, math.max(0, tonumber(a.fadeout) or 0) * g.sp)
+  g.d_in, g.d_out = X.fade_dir_clamp(a.fadein_dir), X.fade_dir_clamp(a.fadeout_dir)
+  g.xa0, g.xb1 = tx(a.inpt), tx(a.outpt)
+  g.xfi = g.xa0 + (g.fin_src / view_w) * cw
+  g.xfo = g.xb1 - (g.fout_src / view_w) * cw
+  g.in_len = {g.xfi, g.gy0}
+  g.out_len = {g.xfo, g.gy0}
+  -- Poignées de courbure FIXES au milieu de la diagonale ; la courbe se déforme autour.
+  local ymid = (g.gy0 + g.gy1) * 0.5
+  g.in_mid = {(g.xa0 + g.xfi) * 0.5, ymid}
+  g.out_mid = {(g.xfo + g.xb1) * 0.5, ymid}
+  g.in_ghost = {g.in_mid[1], g.gy1 - X.fade_curve_gain(0.5, g.d_in) * g.gh}
+  g.out_ghost = {g.out_mid[1], g.gy1 - X.fade_curve_gain(0.5, g.d_out) * g.gh}
+  g.show_in_mid = (g.xfi - g.xa0) >= X.S(14)
+  g.show_out_mid = (g.xb1 - g.xfo) >= X.S(14)
+  return g
+end
+
+function X.fade_hit(g, mx, my)
+  if not g then return nil end
+  local function near(h) return math.abs(mx - h[1]) <= X.S(9) and math.abs(my - h[2]) <= X.S(9) end
+  if g.show_in_mid and near(g.in_mid) then return "in_mid" end
+  if g.show_out_mid and near(g.out_mid) then return "out_mid" end
+  if near(g.in_len) then return "in_len" end
+  if near(g.out_len) then return "out_len" end
+  return nil
 end
 
 function X.draw_wave_editor(a)
@@ -4997,6 +5433,7 @@ function X.draw_wave_editor(a)
     return hit
   end
 
+  X.fz = X.fade_geometry(a, tx, view_w, cw, yb0, yb1)
   local clicked_left = reaper.ImGui_IsItemClicked(ctx, X.C_LEFT)
   local clicked_right = reaper.ImGui_IsItemClicked(ctx, X.C_RIGHT)
   if clicked_left or clicked_right then
@@ -5017,7 +5454,17 @@ function X.draw_wave_editor(a)
         or reaper.ImGui_IsKeyDown(ctx, reaper.ImGui_Key_RightCtrl())
     end
 
-    if in_wave_body and clicked_left and ctrl and not alt then
+    local fade_h = (not marker_hit) and X.fade_hit(X.fz, mx, my) or nil
+    if fade_h then
+      cv_drag, marker_drag = nil, nil
+      if clicked_left then
+        X.fade_drag = {id = a.id, kind = fade_h, y0 = my,
+          d0 = (fade_h == "in_mid") and X.fz.d_in or X.fz.d_out}
+      else
+        X.fade_menu_which = (fade_h:sub(1, 2) == "in") and "in" or "out"
+        reaper.ImGui_OpenPopup(ctx, "##fadecurve_menu")
+      end
+    elseif in_wave_body and clicked_left and ctrl and not alt then
       -- Ctrl + clic-glisser : naviguer (pan) dans la waveform zoomée.
       X.view_drag = {
         id = a.id,
@@ -5181,6 +5628,98 @@ function X.draw_wave_editor(a)
     end
   end
 
+  -- ===== Fondus superposés à la forme d'onde : carré = durée, point au milieu = courbure =====
+  do
+    local fz = X.fz
+    reaper.ImGui_DrawList_PushClipRect(dl, x0, yb0, x0 + cw, yb1, true)
+    local col_in, col_out = 0x2ECC71FF, 0xE74C3CFF
+    -- Repères gain 1 / gain 0 du fondu (discrets).
+    reaper.ImGui_DrawList_AddLine(dl, x0, fz.gy0, x0 + cw, fz.gy0, 0xFFFFFF18, 1)
+    reaper.ImGui_DrawList_AddLine(dl, x0, fz.gy1, x0 + cw, fz.gy1, 0xFFFFFF18, 1)
+    local function draw_fade(xa, xb, d, rising, col)
+      local px, py
+      for i = 0, 28 do
+        local u = i / 28
+        local gg = X.fade_curve_gain(rising and u or (1 - u), d)
+        local xx = xa + (xb - xa) * u
+        local yy = fz.gy1 - gg * fz.gh
+        if px then reaper.ImGui_DrawList_AddLine(dl, px, py, xx, yy, col, X.S(2)) end
+        px, py = xx, yy
+      end
+    end
+    if fz.fin_src > 0 then
+      reaper.ImGui_DrawList_AddLine(dl, fz.xa0, fz.gy1, fz.xfi, fz.gy0, 0xFFFFFF40, X.S(1)) -- diagonale linéaire
+      draw_fade(fz.xa0, fz.xfi, fz.d_in, true, col_in)
+    end
+    if fz.fout_src > 0 then
+      reaper.ImGui_DrawList_AddLine(dl, fz.xfo, fz.gy0, fz.xb1, fz.gy1, 0xFFFFFF40, X.S(1))
+      draw_fade(fz.xfo, fz.xb1, fz.d_out, false, col_out)
+    end
+    local function square(h, col)
+      reaper.ImGui_DrawList_AddRectFilled(dl, h[1] - X.S(5), h[2] - X.S(5), h[1] + X.S(5), h[2] + X.S(5), col)
+      reaper.ImGui_DrawList_AddRect(dl, h[1] - X.S(5), h[2] - X.S(5), h[1] + X.S(5), h[2] + X.S(5), 0xFFFFFFFF, 0, 0, X.S(1))
+    end
+    local function dot(h)
+      reaper.ImGui_DrawList_AddCircleFilled(dl, h[1], h[2], X.S(5), 0xFFFFFFFF)
+      reaper.ImGui_DrawList_AddCircle(dl, h[1], h[2], X.S(5), 0x000000FF, 0, X.S(1))
+    end
+    square(fz.in_len, col_in)
+    square(fz.out_len, col_out)
+    if fz.show_in_mid then
+      reaper.ImGui_DrawList_AddCircleFilled(dl, fz.in_ghost[1], fz.in_ghost[2], X.S(2.5), 0xFFFFFF99)
+      dot(fz.in_mid)
+    end
+    if fz.show_out_mid then
+      reaper.ImGui_DrawList_AddCircleFilled(dl, fz.out_ghost[1], fz.out_ghost[2], X.S(2.5), 0xFFFFFF99)
+      dot(fz.out_mid)
+    end
+    reaper.ImGui_DrawList_PopClipRect(dl)
+
+    local fd = X.fade_drag
+    if fd then
+      if fd.id ~= a.id then
+        X.fade_drag = nil
+      elseif reaper.ImGui_IsMouseDown(ctx, X.C_LEFT) then
+        local fmx, fmy = reaper.ImGui_GetMousePos(ctx)
+        local t = xt(fmx)
+        if fd.kind == "in_len" then
+          a.fadein = math.max(0, math.min(fz.seg_src, t - a.inpt)) / fz.sp
+        elseif fd.kind == "out_len" then
+          a.fadeout = math.max(0, math.min(fz.seg_src, a.outpt - t)) / fz.sp
+        else
+          -- Glisser vers le haut = montée rapide (log), vers le bas = montée lente (exp).
+          -- Déplacement relatif au clic : pleine course = moitié de la hauteur de la zone.
+          local dv = X.fade_dir_clamp((fd.d0 or 0) + ((fd.y0 or fmy) - fmy) / (fz.gh * 0.5))
+          if fd.kind == "in_mid" then a.fadein_dir = dv else a.fadeout_dir = dv end
+        end
+      else
+        X.fade_drag = nil
+        X.save()
+        status = "Fondus modifiés : pris en compte au prochain lancement de la cue."
+      end
+    end
+
+    if reaper.ImGui_BeginPopup(ctx, "##fadecurve_menu") then
+      local which = X.fade_menu_which or "in"
+      local key = (which == "in") and "fadein_dir" or "fadeout_dir"
+      reaper.ImGui_TextDisabled(ctx, which == "in" and "Courbe du fade in" or "Courbe du fade out")
+      reaper.ImGui_Separator(ctx)
+      local presets = {
+        {"Linéaire", 0},
+        {"Rapide au début (logarithmique)", 0.7},
+        {"Lent au début (exponentielle)", -0.7},
+      }
+      for _, pr in ipairs(presets) do
+        if reaper.ImGui_Selectable(ctx, pr[1] .. "##fadepre" .. which .. pr[2]) then
+          a[key] = pr[2]
+          X.save()
+          reaper.ImGui_CloseCurrentPopup(ctx)
+        end
+      end
+      reaper.ImGui_EndPopup(ctx)
+    end
+  end
+  reaper.ImGui_TextDisabled(ctx, "Fondus sur la forme d'onde : carré = durée  |  point central fixe = glisser vers le haut/bas pour la courbure (exp ↔ log)  |  clic droit = préréglages")
   if body_hover then
     local g = X.frac_to_g(1 - (my - yb0)/hw)
     reaper.ImGui_Text(ctx, string.format("t = %.3f s   gain = %s", xt(mx),
@@ -5344,7 +5883,7 @@ end
 
 -- Sélection des cues ciblées (même mode pour STOP, PAUSE, DEVAMP).
 function X.draw_targets_editor(a, kind)
-  local verbs = {stop = "arrêter", pause = "mettre en pause / reprendre", devamp = "passer en Devamp"}
+  local verbs = {stop = "arrêter", pause = "mettre en pause / reprendre", devamp = "passer en Devamp", preset = "modifier avec un preset"}
   local pre = "##" .. kind .. "_"
   reaper.ImGui_Text(ctx, "IDs des cues à " .. (verbs[kind] or "cibler") .. " (ex. Q1,Q8). Les IDs peuvent appartenir à n'importe quel onglet.")
   local target_text = a.targets_text
@@ -5401,7 +5940,7 @@ function X.draw_targets_editor(a, kind)
     local ids = {}
     for _, tab in ipairs(tabs or {}) do
       for _, x in ipairs(tab.actions or {}) do
-        if picked[x.id] and X.is_playable_cue(x) and not (kind == "pause" and X.is_region_cue(x)) then ids[#ids+1] = x.id end
+        if picked[x.id] and X.is_playable_cue(x) and not (kind == "pause" and X.is_region_cue(x)) and not (kind == "preset" and not X.is_file_cue(x)) then ids[#ids+1] = x.id end
       end
     end
     if #ids == 0 then
@@ -5551,12 +6090,12 @@ function X.draw_editor(a, i)
     a.name = v
     -- STOP / PAUSE / DEVAMP : nommer manuellement fige le titre affiché
     -- (sinon il reste calculé à partir des cues ciblées).
-    if a.type == "stop" or a.type == "pause" or a.type == "devamp" then
+    if a.type == "stop" or a.type == "pause" or a.type == "devamp" or a.type == "preset" then
       a.custom_title = true
     end
     X.save()
   end
-  if (a.type == "stop" or a.type == "pause" or a.type == "devamp") and a.custom_title then
+  if (a.type == "stop" or a.type == "pause" or a.type == "devamp" or a.type == "preset") and a.custom_title then
     reaper.ImGui_SameLine(ctx)
     if reaper.ImGui_SmallButton(ctx, "Titre auto##reset_title") then
       a.custom_title = nil
@@ -5589,6 +6128,8 @@ function X.draw_editor(a, i)
 
         local c4, fi = reaper.ImGui_InputDouble(ctx, "Fade in (s)", a.fadein or 0)
         if c4 then a.fadein = math.max(0, fi); X.save() end
+        local c5, fo = reaper.ImGui_InputDouble(ctx, "Fade out (s)##cue_fadeout", a.fadeout or 0)
+        if c5 then a.fadeout = math.max(0, fo); X.save() end
         reaper.ImGui_SetNextItemWidth(ctx, X.S(220))
         local cfc, fc = reaper.ImGui_SliderDouble(ctx, "Courbe du fade##cue_curve", tonumber(a.fade_curve) or 0, 0, 1, "Léger  %.2f  Prononcé")
         if cfc then a.fade_curve = math.max(0, math.min(1, fc)); X.save() end
@@ -5741,6 +6282,37 @@ function X.draw_editor(a, i)
         reaper.ImGui_EndTabItem(ctx)
       end
       reaper.ImGui_EndTabBar(ctx)
+    end
+
+  elseif a.type == "preset" then
+    reaper.ImGui_TextDisabled(ctx, "Rappelle un preset de réglages de lecture sur les cues AUDIO ciblées qui jouent en ce moment.")
+    reaper.ImGui_SetNextItemWidth(ctx, X.S(110))
+    local cpi, pv = reaper.ImGui_InputInt(ctx, "N° du preset à rappeler##preset_id", tonumber(a.preset_id) or 0)
+    if cpi then a.preset_id = math.max(0, pv); X.save() end
+    reaper.ImGui_SetNextItemWidth(ctx, X.S(110))
+    local cdu, dv = reaper.ImGui_InputDouble(ctx, "Temps de transition (s)##preset_dur", tonumber(a.dur) or 0, 0, 0, "%.2f")
+    if cdu then a.dur = math.max(0, dv); X.save() end
+    reaper.ImGui_Separator(ctx)
+    X.draw_targets_editor(a, "preset")
+    reaper.ImGui_Separator(ctx)
+    local pids = X.resolve_targets(a)
+    if pids then
+      for _, tid in ipairs(pids) do
+        local cue = actions_by_id[tid] or actions_by_id[tostring(tid)]
+        if cue and X.is_file_cue(cue) then
+          X.ensure_presets(cue)
+          local q = X.preset_by_id(cue, a.preset_id)
+          if q then
+            reaper.ImGui_TextDisabled(ctx, string.format("Q%s — %s : preset %d « %s »", tostring(tid), cue.name or "", q.id, q.name))
+          else
+            reaper.ImGui_TextColored(ctx, 0xF39C12FF, string.format("Q%s — %s : le preset %d n'existe pas pour cette cue.", tostring(tid), cue.name or "", tonumber(a.preset_id) or 0))
+          end
+        else
+          reaper.ImGui_TextColored(ctx, 0xF39C12FF, string.format("Q%s : cible ignorée (seules les cues AUDIO ont des presets).", tostring(tid)))
+        end
+      end
+    else
+      reaper.ImGui_TextDisabled(ctx, "Sans cible : toutes les cues AUDIO en cours de lecture.")
     end
 
   elseif a.type == "osc" then
@@ -6238,6 +6810,8 @@ function X.draw()
   reaper.ImGui_SameLine(ctx)
   if reaper.ImGui_Button(ctx, "+ Region") then X.add_action("region") end
   reaper.ImGui_SameLine(ctx)
+  if reaper.ImGui_Button(ctx, "+ Preset") then X.add_action("preset") end
+  reaper.ImGui_SameLine(ctx)
   if reaper.ImGui_Button(ctx, "+ Snapshot") then X.add_action("snapshot") end
   reaper.ImGui_SameLine(ctx)
   if reaper.ImGui_Button(ctx, "+ Stop") then X.add_action("stop") end
@@ -6550,6 +7124,14 @@ function X.draw()
             end
             local verb = a.type == "devamp" and "devamp" or (a.unpause == true and "unpause" or "pause")
             if #names > 0 then title_text = verb .. " " .. table.concat(names, ", ") end
+          elseif a.type == "preset" then
+            local pnames = {}
+            for _, target_id in ipairs(X.resolve_targets(a) or {}) do
+              local tgt = actions_by_id[target_id] or actions_by_id[tostring(target_id)]
+              pnames[#pnames+1] = '"' .. (tgt and tgt.name or ("Cue introuvable " .. tostring(target_id))) .. '"'
+            end
+            title_text = "preset " .. tostring(tonumber(a.preset_id) or 0)
+              .. (#pnames > 0 and (" " .. table.concat(pnames, ", ")) or "")
           end
         end
         local renaming = X.rename and X.rename.id == a.id
@@ -6715,6 +7297,9 @@ function X.draw()
             local base = a.snap_projfn:match("([^/\\]+)$") or a.snap_projfn
             cible = cible .. " + snapshot → " .. base
           end
+        elseif a.type == "preset" then
+          local pids = X.resolve_targets(a)
+          cible = (pids and (#pids .. " cue(s)") or "toutes") .. " → preset " .. tostring(tonumber(a.preset_id) or 0)
         elseif a.type == "osc" then
           cible = a.port_name ~= "" and a.port_name or "(port)"
         elseif a.type == "midi" then
@@ -6890,3 +7475,4 @@ do
 end
 
 reaper.defer(X.loop)
+
