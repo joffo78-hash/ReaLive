@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Realive" commit="c96c619bed5a2ba3493bf7a4135f8061b6ee0c07">
+<index version="1" name="Realive" commit="9c7cb47c7b011d5cc66da33af67d316778c720b1">
   <category name="Scripts/Realive">
-    <reapack name="Realive.lua" type="script" desc="Realive — système de cues pour REAPER">
+    <reapack name="Realive.lua" type="script" desc="ReaCues — système de cues pour REAPER">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
 \widowctrl\hyphauto
 
-{\pard \ql \f0 \sa180 \li0 \fi0 Realive est un syst\u232 ?me de cues de type QLab pour REAPER. N\u233 ?cessite ReaImGui. Les fonctions OSC n\u233 ?cessitent Mavriq Lua Sockets.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 ReaCues est un syst\u232 ?me de cues de type QLab pour REAPER. N\u233 ?cessite ReaImGui. Les fonctions OSC n\u233 ?cessitent Mavriq Lua Sockets.\par}
 }
 ]]></description>
-        <link rel="website">https://github.com/joffo78-hash/Realive</link>
+        <link rel="website">https://github.com/joffo78-hash/ReaCues</link>
       </metadata>
       <version name="1.0" author="joffo78-hash" time="2026-10-28T10:26:47Z">
         <changelog><![CDATA[Première version préparée pour l'indexation ReaPack.]]></changelog>
