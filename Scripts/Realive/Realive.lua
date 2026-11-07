@@ -1,5 +1,5 @@
 -- @description Realive — système de cues pour REAPER
--- @version 1.7
+-- @version 1.5.2
 -- @author joffo78-hash
 -- @link https://github.com/joffo78-hash/Realive
 -- @about
@@ -391,7 +391,11 @@ end
 
 ---------------------------------------------------------------- Utilitaires
 function X.is_playing()
-  return (math.floor(reaper.GetPlayStateEx(PROJ)) & 1) ~= 0
+  local st = math.floor(reaper.GetPlayStateEx(PROJ))
+  if (st & 1) ~= 0 then return true end
+  -- Pause globale : la lecture n'est pas terminée, seulement suspendue.
+  local gp = X.global_pause
+  return gp ~= nil and gp.main == true and (st & 2) ~= 0
 end
 
 function X.now_pos()
@@ -697,10 +701,6 @@ end
 function X.add_file_item(dest, file, pos, tin, seg, fadein, gain, id, markers)
   local src = reaper.PCM_Source_CreateFromFile(file)
   if not src then return nil end
-  -- IMPORTANT : lire la longueur de la source TANT QU'ELLE EST VALIDE. Après
-  -- SetMediaItemTake_Source puis SetItemStateChunk (inversion, voir set_item_reverse),
-  -- REAPER reconstruit take + source : le pointeur `src` devient invalide.
-  local src_len = reaper.GetMediaSourceLength(src)
   local new = reaper.AddMediaItemToTrack(dest)
   local ntk = reaper.AddTakeToMediaItem(new)
   reaper.SetMediaItemTake_Source(ntk, src)
@@ -729,12 +729,7 @@ function X.add_file_item(dest, file, pos, tin, seg, fadein, gain, id, markers)
     if cue.wave_pitch_link then pitch = 12 * (math.log(speed) / math.log(2)) end
     reaper.SetMediaItemTakeInfo_Value(ntk, "D_PITCH", pitch)
     -- L'inversion est portée par la source SECTION native de REAPER.
-    if X.set_item_reverse then
-      X.set_item_reverse(new, cue.wave_reverse)
-      -- SetItemStateChunk reconstruit les takes : l'ancien pointeur `ntk` (et `src`)
-      -- ne doit plus être utilisé. On récupère le take courant.
-      ntk = reaper.GetActiveTake(new) or ntk
-    end
+    if X.set_item_reverse then X.set_item_reverse(new, cue.wave_reverse) end
     -- L'adaptation initiale est calculée explicitement depuis le BPM source ;
     -- ne pas activer C_AUTOSTRETCH sur les items internes de ReaLive.
     reaper.SetMediaItemInfo_Value(new, "C_BEATATTACHMODE", 0)
@@ -751,7 +746,7 @@ function X.add_file_item(dest, file, pos, tin, seg, fadein, gain, id, markers)
     local lo_c = tonumber(cue.loop_out) or tout_c
     -- Fin de référence = OUT, borné par la vraie longueur de la source (OUT peut dépasser de
     -- quelques ms à cause des arrondis) ; tolérance de 20 ms.
-    local full_len = src_len
+    local full_len = reaper.GetMediaSourceLength(src)
     local end_ref = tout_c or full_len
     if full_len and full_len > 0 then end_ref = math.min(end_ref or full_len, full_len) end
     local ends_at_out = end_ref and ((tonumber(tin) or 0) + (tonumber(seg) or 0)) >= end_ref - 0.02
@@ -1673,21 +1668,38 @@ function X.replace_on_tracks(tracks, id, target, fade)
         if mark ~= "" and tostring(mark) ~= sid then
           local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
           local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
-          if pos + len > t_cut then
+          -- Si la cue remplacée possède un fade out (waveform), c'est CE fondu qui s'applique
+          -- à sa sortie, même si elle n'est pas arrivée au bout ; sinon on garde le fondu
+          -- (crossfade) de la nouvelle cue.
+          local old_cue = actions_by_id[tonumber(mark) or mark] or actions_by_id[tostring(mark)]
+          local old_fo = (old_cue and X.is_file_cue(old_cue)) and math.max(0, tonumber(old_cue.fadeout) or 0) or 0
+          local item_hard = hard and old_fo <= 0
+          local cut = (hard and old_fo > 0) and p or t_cut
+          if pos + len > cut then
             local tk = reaper.GetActiveTake(it)
-            if hard then
+            if item_hard then
               if tk and not reaper.TakeIsMIDI(tk) then
                 reaper.SetMediaItemTakeInfo_Value(tk, "D_VOL", 0)
               end
               reaper.SetMediaItemInfo_Value(it, "D_VOL", 0)
               reaper.DeleteTrackMediaItem(tr, it)
-            elseif pos >= t_cut then
+            elseif pos >= cut then
               reaper.DeleteTrackMediaItem(tr, it)
             else
-              local new_end = math.min(pos + len, t_end)
-              reaper.SetMediaItemInfo_Value(it, "D_LENGTH", math.max(0.001, new_end - pos))
-              reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN", math.max(0, new_end - t_cut))
-              reaper.UpdateItemInProject(it)
+              local t_end_item = (old_fo > 0) and (cut + math.max(ANTICLICK, old_fo)) or t_end
+              local new_end = math.min(pos + len, t_end_item)
+              local cur_fo = reaper.GetMediaItemInfo_Value(it, "D_FADEOUTLEN") or 0
+              if old_fo > 0 and cur_fo > 0 and (pos + len - cur_fo) <= cut then
+                -- Déjà dans son propre fade out : on le laisse se terminer tel quel.
+              else
+                reaper.SetMediaItemInfo_Value(it, "D_LENGTH", math.max(0.001, new_end - pos))
+                reaper.SetMediaItemInfo_Value(it, "D_FADEOUTLEN", math.max(0, new_end - cut))
+                if old_fo > 0 then
+                  reaper.SetMediaItemInfo_Value(it, "D_FADEOUTDIR",
+                    X.fade_dir_clamp(old_cue.fadeout_dir) * X.FADEOUT_DIR_SIGN)
+                end
+                reaper.UpdateItemInProject(it)
+              end
             end
             stopped[#stopped + 1] = tonumber(mark) or mark
           end
@@ -1719,7 +1731,7 @@ end
 function X.process_ext(now)
   if next(ext_runs) == nil then return end
   for id, r in pairs(ext_runs) do
-    local playing = (math.floor(reaper.GetPlayStateEx(r.proj)) & 1) ~= 0
+    local playing = ((math.floor(reaper.GetPlayStateEx(r.proj)) & 1) ~= 0) or r.gpaused == true
     if not playing then
       if now - r.t0 > 0.8 then
         reaper.SetMediaTrackInfo_Value(r.master, "D_VOL", r.v0)
@@ -2493,8 +2505,8 @@ function X.fire_stop(a)
   -- Le champ Q1,Q8 est la source de vérité lorsqu'il est présent.
   if type(a.targets_text) == "string" then
     local parsed, seen, invalid = {}, {}, false
-    for raw_token in (a.targets_text .. ","):gmatch("(.-),") do
-      local token = raw_token:match("^%s*(.-)%s*$")
+    for token in (a.targets_text .. ","):gmatch("(.-),") do
+      token = token:match("^%s*(.-)%s*$")
       if token ~= "" then
         local digits = token:match("^[Qq]?(%d+)$")
         if digits then
@@ -3139,6 +3151,7 @@ function X.process_jobs()
   X.process_runs(now)
   X.process_preset_morphs(now)
   X.process_ext(now)
+  X.process_global_pause()
   X.refresh_active(now)
   X.process_take_markers(now)
   -- Arrêt transport = option "Arrêter la lecture quand plus aucun média…".
@@ -3192,7 +3205,7 @@ function X.process_jobs()
   end
   for i = #del_jobs, 1, -1 do
     local j = del_jobs[i]
-    if now >= j.at then
+    if now >= j.at and not X.global_pause then
       local keep_job = false
       if j.stop_transport then
         if reaper.time_precise() < (fade_hold_until or 0) or auto_chain then
@@ -3299,6 +3312,95 @@ function X.process_jobs()
   end
 end
 
+---------------------------------------------------------------- PAUSE GLOBALE
+-- Met la TIMELINE en pause (transport du projet + transports des autres projets jouant une
+-- région). Rien n'est effacé : les items restent posés, on peut donc revenir en arrière avec la
+-- tête de lecture, puis relancer. Pendant la pause, le moteur de cues considère la lecture
+-- comme toujours active (X.is_playing) et les minuteurs en temps réel sont gelés, puis décalés
+-- de la durée de la pause à la reprise.
+X.global_pause = nil
+
+function X.global_pause_all()
+  local gp = {t0 = reaper.time_precise(), main = false, exts = {}}
+  local st = math.floor(reaper.GetPlayStateEx(PROJ))
+  if (st & 1) ~= 0 and (st & 2) == 0 then
+    X.on_main(function() reaper.OnPauseButton() end)
+    gp.main = true
+  end
+  for id, r in pairs(ext_runs) do
+    if r.proj and not r.stopping and not r.gpaused then
+      local es = math.floor(reaper.GetPlayStateEx(r.proj))
+      if (es & 1) ~= 0 and (es & 2) == 0 then
+        X.with_proj(r.proj, function() reaper.OnPauseButton() end)
+        r.gpaused = true
+        gp.exts[#gp.exts + 1] = {id = id, r = r}
+      end
+    end
+  end
+  if not gp.main and #gp.exts == 0 then
+    status = "Pause : aucun média en cours."
+    return
+  end
+  X.global_pause = gp
+  status = "PAUSE : timeline arrêtée (tu peux revenir en arrière, puis relancer)."
+end
+
+-- Décale les minuteurs en temps réel de la durée de la pause.
+function X.global_pause_finish(gp)
+  if gp.finished then return end
+  gp.finished = true
+  local dur = reaper.time_precise() - gp.t0
+  for _, e in ipairs(gp.exts) do
+    local r = e.r
+    r.gpaused = nil
+    r.t0 = (tonumber(r.t0) or reaper.time_precise()) + dur
+    if r.stopping then r.stopping.t0 = r.stopping.t0 + dur end
+  end
+  if auto_chain and auto_chain.deadline and auto_chain.deadline ~= math.huge then
+    auto_chain.deadline = auto_chain.deadline + dur
+  end
+  for _, m in ipairs(X.pmorphs) do m.t0 = m.t0 + dur end
+  for _, j in ipairs(del_jobs) do j.at = j.at + dur end
+  if fade_hold_until > gp.t0 then fade_hold_until = fade_hold_until + dur end
+end
+
+function X.global_resume()
+  local gp = X.global_pause
+  if not gp or gp.resuming then return end
+  gp.resuming = true
+  if gp.main and (math.floor(reaper.GetPlayStateEx(PROJ)) & 2) ~= 0 then
+    X.on_main(function() reaper.OnPauseButton() end)
+  end
+  for _, e in ipairs(gp.exts) do
+    local r = e.r
+    if r.proj and (math.floor(reaper.GetPlayStateEx(r.proj)) & 2) ~= 0 then
+      X.with_proj(r.proj, function() reaper.OnPauseButton() end)
+    end
+  end
+  status = "REPRISE."
+end
+
+function X.global_pause_toggle()
+  if X.global_pause then X.global_resume() else X.global_pause_all() end
+end
+
+-- Termine l'état de pause quand le transport n'est plus en pause (reprise par le bouton,
+-- par la barre d'espace de REAPER, par un GO, ou arrêt).
+function X.process_global_pause()
+  local gp = X.global_pause
+  if not gp then return end
+  if not gp.resuming and reaper.time_precise() - gp.t0 < 0.5 then return end
+  if gp.main and (math.floor(reaper.GetPlayStateEx(PROJ)) & 2) ~= 0 then return end
+  for _, e in ipairs(gp.exts) do
+    if ext_runs[e.id] == e.r and e.r.gpaused and e.r.proj
+       and (math.floor(reaper.GetPlayStateEx(e.r.proj)) & 2) ~= 0 then
+      return
+    end
+  end
+  X.global_pause = nil
+  X.global_pause_finish(gp)
+end
+
 ---------------------------------------------------------------- FONDUS (début / fin de cue)
 -- a.fadein / a.fadeout : durées en secondes PROJET ; a.fadein_dir / a.fadeout_dir : courbure -1..1
 -- (0 = linéaire ; > 0 = montée rapide, type logarithmique ; < 0 = montée lente, type exponentielle).
@@ -3348,6 +3450,49 @@ function X.preset_norm(p)
   return p
 end
 
+-- Nom automatique d'un preset : uniquement les réglages différents des valeurs par défaut.
+-- G-10 = gain -10 dB ; pl 20 / pr 20 = pan 20 % gauche / droite ; S0,1 = vitesse 0,1 ;
+-- P+2 = pitch +2 demi-tons ; L = pitch lié à la vitesse ; T = stretch au tempo ; R = reverse.
+function X.preset_num_str(v, decimals)
+  local str = string.format("%." .. (decimals or 2) .. "f", v)
+  if str:find("%.") then
+    str = str:gsub("0+$", "")
+    str = str:gsub("%.$", "")
+  end
+  str = str:gsub("%.", ",")
+  return str
+end
+
+function X.preset_autoname(p)
+  local t = {}
+  if math.abs(p.gain) >= 0.05 then
+    t[#t + 1] = "G" .. (p.gain > 0 and "+" or "") .. X.preset_num_str(p.gain, 1)
+  end
+  if math.abs(p.pan) >= 0.005 then
+    t[#t + 1] = (p.pan < 0 and "pl " or "pr ") .. string.format("%d", math.floor(math.abs(p.pan) * 100 + 0.5))
+  end
+  if math.abs(p.speed - 1) >= 0.0005 then
+    t[#t + 1] = "S" .. X.preset_num_str(p.speed, 3)
+  end
+  if p.pitch_link then
+    t[#t + 1] = "L"
+  elseif math.abs(p.pitch) >= 0.005 then
+    t[#t + 1] = "P" .. (p.pitch > 0 and "+" or "") .. X.preset_num_str(p.pitch, 2)
+  end
+  if p.stretch then t[#t + 1] = "T" end
+  if p.reverse then t[#t + 1] = "R" end
+  return #t > 0 and table.concat(t, " ") or "Défaut"
+end
+
+-- Plus petit numéro de preset libre (un numéro supprimé est réattribué).
+function X.preset_free_id(a)
+  local used = {}
+  for _, q in ipairs(a.presets or {}) do used[q.id] = true end
+  local n = 0
+  while used[n] do n = n + 1 end
+  return n
+end
+
 function X.preset_by_id(a, id)
   id = tonumber(id)
   if id == nil or type(a) ~= "table" or type(a.presets) ~= "table" then return nil end
@@ -3371,7 +3516,12 @@ function X.ensure_presets(a)
   for _, p in ipairs(a.presets) do
     p.id = tonumber(p.id) or 0
     X.preset_norm(p)
-    p.name = tostring(p.name or ("Preset " .. p.id))
+    p.name = tostring(p.name or "")
+    if p.custom == nil then
+      -- Anciens presets : un nom saisi à la main est conservé, les noms par défaut deviennent automatiques.
+      p.custom = not (p.name == "" or p.name == "Défaut" or p.name:match("^Preset %d+$") ~= nil)
+    end
+    if not p.custom then p.name = X.preset_autoname(p) end
     if p.id > maxid then maxid = p.id end
   end
   a.preset_next = math.max(tonumber(a.preset_next) or 0, maxid + 1)
@@ -3642,6 +3792,7 @@ end
 function X.process_auto_chain()
   local chain = auto_chain
   if not chain then return end
+  if X.global_pause then return end -- gelé pendant la pause globale
   -- Ne pas lancer une cue d'un onglet devenu inactif ni un ID qui a été supprimé.
   if chain.tab_index ~= active_tab then auto_chain = nil; return end
   local now = reaper.time_precise()
@@ -4146,10 +4297,51 @@ function X.rebuild_wave_peaks(file)
   return X.build_peaks_file(file)
 end
 
+-- Régénération forcée : supprime le fichier .reapeaks existant (peut être corrompu ou périmé,
+-- surtout avec FLAC / MP3) puis demande à REAPER de le reconstruire entièrement.
+function X.regenerate_wave(file)
+  if not file or file == "" then status = "Aucun fichier audio."; return end
+  local pk = file .. ".reapeaks"
+  local removed, had = false, false
+  if reaper.file_exists(pk) then
+    had = true
+    removed = (os.remove(pk) and true) or false
+  end
+  wave_cache[file] = nil
+  local ok, msg = X.build_peaks_file(file)
+  wave_cache[file] = nil
+  reaper.UpdateArrange()
+  if not ok then
+    status = msg or "REAPER n'a pas pu reconstruire les peaks."
+  elseif had and not removed then
+    status = "Peaks reconstruits, mais l'ancien .reapeaks n'a pas pu être supprimé (fichier verrouillé ?)."
+  elseif not had then
+    status = "Peaks reconstruits. Aucun .reapeaks à côté du fichier (cache de peaks alternatif ?) : l'ancien cache n'a pas pu être supprimé."
+  else
+    status = "Forme d'onde régénérée : " .. tostring(file)
+  end
+end
+
 function X.get_wave(file)
   local w = wave_cache[file]
-  if w then return w end
+  if w then
+    -- Échec transitoire (REAPER construit encore ses peaks, fichier en cours de copie...) :
+    -- on réessaie automatiquement toutes les ~1,5 s au lieu de garder l'erreur en cache.
+    if w.err and w.retry_at and reaper.time_precise() >= w.retry_at then
+      local tries = (w.tries or 0) + 1
+      if tries == 2 then X.build_peaks_file(file) end -- 2e échec : reconstruction complète
+      wave_cache[file] = nil
+      local nw = X.get_wave(file)
+      if nw.err then
+        nw.tries = tries
+        nw.retry_at = (tries < 20) and (reaper.time_precise() + 1.5) or nil
+      end
+      return nw
+    end
+    return w
+  end
   w = {views = {}}
+  w.retry_at = reaper.time_precise() + 1.5
   wave_cache[file] = w
   local src = reaper.PCM_Source_CreateFromFile(file)
   if not src then w.err = "Fichier illisible." return w end
@@ -4817,6 +5009,7 @@ function X.draw_play_settings(a)
     -- Les curseurs éditent le preset sélectionné dans la boîte de droite.
     local function commit()
       X.preset_norm(p)
+      if not p.custom then p.name = X.preset_autoname(p) end
       X.preset_activate(a, p)
       X.save()
     end
@@ -4875,16 +5068,16 @@ function X.draw_play_settings(a)
 
     if reaper.ImGui_Button(ctx, "Ajouter##preset_add") then
       local np = X.clone_table(p)
-      np.id = a.preset_next
-      a.preset_next = a.preset_next + 1
-      np.name = "Preset " .. np.id
+      np.id = X.preset_free_id(a)
+      np.custom = false
+      np.name = X.preset_autoname(np)
       a.presets[#a.presets + 1] = np
       a.preset_edit = np.id
       X.save()
       status = "Preset " .. np.id .. " ajouté (copie de " .. p.id .. ")."
     end
     reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_Button(ctx, "Modifier##preset_rename_btn") then
+    if reaper.ImGui_Button(ctx, "Renommer##preset_rename_btn") then
       X.preset_rename = {id = a.id, buf = p.name, focus = true}
       reaper.ImGui_OpenPopup(ctx, "Renommer le preset##preset_rename")
     end
@@ -4909,9 +5102,17 @@ function X.draw_play_settings(a)
         if rn.focus then reaper.ImGui_SetKeyboardFocusHere(ctx); rn.focus = false end
         local cn, nv = reaper.ImGui_InputText(ctx, "Nom##preset_name_in", rn.buf)
         if cn then rn.buf = nv end
+        reaper.ImGui_TextDisabled(ctx, "Laisser vide = nom automatique")
         if reaper.ImGui_Button(ctx, "Valider##preset_name_ok") then
           local nm = tostring(rn.buf or ""):match("^%s*(.-)%s*$")
-          if nm ~= "" then p.name = nm; X.save() end
+          if nm == "" then
+            p.custom = false
+            p.name = X.preset_autoname(p)
+          else
+            p.custom = true
+            p.name = nm
+          end
+          X.save()
           X.preset_rename = nil
           reaper.ImGui_CloseCurrentPopup(ctx)
         end
@@ -5023,6 +5224,8 @@ function X.draw_wave_editor(a)
     -- avec a.file == nil, sinon X.get_wave(nil) provoque « table index is nil ».
     return
   end
+  reaper.ImGui_SameLine(ctx)
+  if reaper.ImGui_Button(ctx, "Régénérer forme d'onde##wave_regen") then X.regenerate_wave(a.file) end
   reaper.ImGui_Separator(ctx)
   a.markers = type(a.markers) == "table" and a.markers or {}
   a.marker_name = a.marker_name or "Q1"
@@ -6122,6 +6325,10 @@ function X.draw_editor(a, i)
           a.view_zoom, a.view_offset = 1.0, 0.0
           X.save()
         end
+        if a.file and a.file ~= "" then
+          reaper.ImGui_SameLine(ctx)
+          if reaper.ImGui_Button(ctx, "Régénérer forme d'onde##source_regen") then X.regenerate_wave(a.file) end
+        end
 
         local c, g = X.track_combo("Piste cible", a.track, false)
         if c then a.track = g; X.save() end
@@ -6804,7 +7011,31 @@ function X.draw()
   reaper.ImGui_PopStyleVar(ctx, 1)
   if go_pressed then X.go_selected() end
   reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_BeginGroup(ctx)
   reaper.ImGui_Text(ctx, "Prochaine : "..sel_name)
+  do
+    -- Pause globale : met tout en pause sans rien effacer ; un nouvel appui relance.
+    local paused_all = X.global_pause ~= nil
+    local bcol = paused_all and (((math.floor(reaper.time_precise() * 2) % 2) == 0) and 0xF39C12FF or 0x8A5A0AFF) or nil
+    if bcol then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), bcol) end
+    if reaper.ImGui_Button(ctx, "##global_pause", X.S(56), X.S(30)) then X.global_pause_toggle() end
+    if bcol then reaper.ImGui_PopStyleColor(ctx) end
+    local gx0, gy0 = reaper.ImGui_GetItemRectMin(ctx)
+    local gx1, gy1 = reaper.ImGui_GetItemRectMax(ctx)
+    local gcx, gcy = (gx0 + gx1) * 0.5, (gy0 + gy1) * 0.5
+    local gdl = reaper.ImGui_GetWindowDrawList(ctx)
+    local gu = X.S(1)
+    if paused_all then
+      reaper.ImGui_DrawList_AddTriangleFilled(gdl, gcx - 5 * gu, gcy - 8 * gu, gcx - 5 * gu, gcy + 8 * gu, gcx + 8 * gu, gcy, 0xFFFFFFFF)
+    else
+      reaper.ImGui_DrawList_AddRectFilled(gdl, gcx - 7 * gu, gcy - 8 * gu, gcx - 2 * gu, gcy + 8 * gu, 0xF39C12FF)
+      reaper.ImGui_DrawList_AddRectFilled(gdl, gcx + 2 * gu, gcy - 8 * gu, gcx + 7 * gu, gcy + 8 * gu, 0xF39C12FF)
+    end
+    if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+      reaper.ImGui_SetTooltip(ctx, paused_all and "Reprendre tout là où c'était" or "Pause : arrête la timeline (retour en arrière possible), régions d'autres projets comprises")
+    end
+  end
+  reaper.ImGui_EndGroup(ctx)
 
   if reaper.ImGui_Button(ctx, "+ Audio") then X.add_action("audio") end
   reaper.ImGui_SameLine(ctx)
@@ -7125,13 +7356,21 @@ function X.draw()
             local verb = a.type == "devamp" and "devamp" or (a.unpause == true and "unpause" or "pause")
             if #names > 0 then title_text = verb .. " " .. table.concat(names, ", ") end
           elseif a.type == "preset" then
-            local pnames = {}
+            -- Titre automatique : "Intro G-10 / Ambiance P+2" (nom de la cue capturée + nom du preset rappelé).
+            local pid = tonumber(a.preset_id) or 0
+            local parts = {}
             for _, target_id in ipairs(X.resolve_targets(a) or {}) do
               local tgt = actions_by_id[target_id] or actions_by_id[tostring(target_id)]
-              pnames[#pnames+1] = '"' .. (tgt and tgt.name or ("Cue introuvable " .. tostring(target_id))) .. '"'
+              local pname = "?"
+              local cue_label = (tgt and tgt.name and tgt.name ~= "") and tgt.name or ("Q" .. tostring(target_id))
+              if tgt and X.is_file_cue(tgt) then
+                X.ensure_presets(tgt)
+                local q = X.preset_by_id(tgt, pid)
+                pname = q and q.name or ("preset " .. pid .. " ?")
+              end
+              parts[#parts + 1] = cue_label .. " " .. pname
             end
-            title_text = "preset " .. tostring(tonumber(a.preset_id) or 0)
-              .. (#pnames > 0 and (" " .. table.concat(pnames, ", ")) or "")
+            title_text = #parts > 0 and table.concat(parts, " / ") or ("Preset " .. pid)
           end
         end
         local renaming = X.rename and X.rename.id == a.id
@@ -7230,13 +7469,63 @@ function X.draw()
         -- sans modifier la cue préparée ni la sélection multiple.
         reaper.ImGui_SameLine(ctx, 0, X.S(3))
         if X.is_playable_cue(a) then
-          if reaper.ImGui_SmallButton(ctx, "■##stopcue" .. tostring(a.id)) then
+          -- Bouton multi-fonction : ■ repos / ▶ lecture / ⏸ pause / ∞ boucle.
+          local rn = runs[a.id] or runs[tostring(a.id)]
+          local er = ext_runs[a.id] or ext_runs[tostring(a.id)]
+          local mode = "stop"
+          if X.global_pause and ((rn and rn.alive) or er) then
+            mode = "pause"
+          elseif rn and rn.alive then
+            if rn.paused then mode = "pause"
+            elseif rn.loop and not (rn.phase == "release" or rn.devamp or rn.devamp_armed) then mode = "loop"
+            else mode = "play" end
+          elseif er then
+            mode = (er.loop and not (er.devamp or er.devamp_armed or er.stopping)) and "loop" or "play"
+          elseif st == "run" or st == "fade" then
+            mode = "play"
+          end
+          local function stop_this()
             X.stop_targets({a.id}, stop_fade)
             stop_until[a.id] = reaper.time_precise() + stop_fade + 0.2 + margin/1000
           end
+          if reaper.ImGui_Button(ctx, "##stopcue" .. tostring(a.id), X.S(22), X.S(18)) then
+            if mode == "pause" then
+              if X.global_pause then X.global_resume() else X.resume_run(a.id, 0) end
+            elseif mode == "loop" then
+              if not X.devamp_run(a.id, nil, 0) then stop_this() end -- devamp, sinon stop
+            else
+              stop_this()                                 -- play / repos : stop
+            end
+          end
+          do
+            local ix0, iy0 = reaper.ImGui_GetItemRectMin(ctx)
+            local ix1, iy1 = reaper.ImGui_GetItemRectMax(ctx)
+            local cx, cy = (ix0 + ix1) * 0.5, (iy0 + iy1) * 0.5
+            local idl = reaper.ImGui_GetWindowDrawList(ctx)
+            local u = X.S(1)
+            if mode == "play" then
+              reaper.ImGui_DrawList_AddTriangleFilled(idl, cx - 3 * u, cy - 5 * u, cx - 3 * u, cy + 5 * u, cx + 5 * u, cy, 0x2ECC71FF)
+            elseif mode == "pause" then
+              reaper.ImGui_DrawList_AddRectFilled(idl, cx - 4 * u, cy - 5 * u, cx - 1 * u, cy + 5 * u, 0xF39C12FF)
+              reaper.ImGui_DrawList_AddRectFilled(idl, cx + 1 * u, cy - 5 * u, cx + 4 * u, cy + 5 * u, 0xF39C12FF)
+            elseif mode == "loop" then
+              reaper.ImGui_DrawList_AddCircle(idl, cx - 3.5 * u, cy, 3.3 * u, 0x4DB3FFFF, 0, 1.8 * u)
+              reaper.ImGui_DrawList_AddCircle(idl, cx + 3.5 * u, cy, 3.3 * u, 0x4DB3FFFF, 0, 1.8 * u)
+            else
+              reaper.ImGui_DrawList_AddRectFilled(idl, cx - 4 * u, cy - 4 * u, cx + 4 * u, cy + 4 * u, 0xC8C8C8FF)
+            end
+          end
+          if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
+            local tips = {
+              stop = "Stop", play = "En lecture : cliquer pour arrêter",
+              pause = "En pause : cliquer pour reprendre",
+              loop = "En boucle : cliquer pour sortir de la boucle (devamp) ; stop s'il n'y a pas de boucle",
+            }
+            reaper.ImGui_SetTooltip(ctx, tips[mode])
+          end
         else
           -- Réserver l'espace pour garder l'alignement des boutons de statut.
-          reaper.ImGui_Dummy(ctx, X.S(18), X.S(1))
+          reaper.ImGui_Dummy(ctx, X.S(22), X.S(1))
         end
 
         if auto_chain and auto_chain.source_id == a.id and auto_chain.tab_index == active_tab then
