@@ -1,9 +1,9 @@
--- @description Realive — système de cues pour REAPER
--- @version 1.72
+-- @description ReaCues — système de cues pour REAPER
+-- @version 1.0
 -- @author joffo78-hash
--- @link https://github.com/joffo78-hash/Realive
+-- @link https://github.com/joffo78-hash/ReaCues
 -- @about
---   Realive est un système de cues de type QLab pour REAPER.
+--   ReaCues est un système de cues de type QLab pour REAPER.
 --   Nécessite ReaImGui. Les fonctions OSC nécessitent Mavriq Lua Sockets.
 --
 -- ActionList.lua
@@ -349,10 +349,10 @@ X.EN = {
   ["Zoom interface"] = "Interface zoom",
   ["Couleur des objets bleus de l’interface"] = "Color of the interface's blue objects",
   ["Couleur des objets bleus"] = "Blue objects color",
-  ["☕ Soutenir ReaLive"] = "☕ Support ReaLive",
-  ["Pour soutenir ReaLive, ouvre cette adresse dans ton navigateur :\n"] = "To support ReaLive, open this address in your browser:\n",
-  ["Soutenir ReaLive"] = "Support ReaLive",
-  ["Ouvrir la page Buy Me a Coffee de ReaLive"] = "Open ReaLive's Buy Me a Coffee page",
+  ["☕ Soutenir ReaCues"] = "☕ Support ReaCues",
+  ["Pour soutenir ReaCues, ouvre cette adresse dans ton navigateur :\n"] = "To support ReaCues, open this address in your browser:\n",
+  ["Soutenir ReaCues"] = "Support ReaCues",
+  ["Ouvrir la page Buy Me a Coffee de ReaCues"] = "Open the ReaCues Buy Me a Coffee page",
   ["Liste active : "] = "Active list: ",
   ["Onglets réorganisés."] = "Tabs reordered.",
   ["Nouvel onglet créé."] = "New tab created.",
@@ -376,8 +376,8 @@ X.EN = {
   ["Fichier invalide : "] = "Invalid file: ",
   ["Impossible d'analyser : "] = "Unable to parse: ",
   ["Impossible d'ouvrir : "] = "Unable to open: ",
-  ["Enregistrer le Bundle ReaLive (nom du fichier Lua)"] = "Save the ReaLive Bundle (Lua file name)",
-  ["Enregistrer le Bundle ReaLive (taper le nom du fichier Lua)"] = "Save the ReaLive Bundle (type the Lua file name)",
+  ["Enregistrer le Bundle ReaCues (nom du fichier Lua)"] = "Save the ReaCues Bundle (Lua file name)",
+  ["Enregistrer le Bundle ReaCues (taper le nom du fichier Lua)"] = "Save the ReaCues Bundle (type the Lua file name)",
   ["Enregistrer l'ActionList (taper le nom et valider)"] = "Save the ActionList (type the name and confirm)",
   ["Enregistrer l'ActionList"] = "Save the ActionList",
   ["ActionList enregistrée : "] = "ActionList saved: ",
@@ -414,8 +414,8 @@ X.EN = {
   ["Liste 1"] = "List 1",
   ["Liste "] = "List ",
   ["Liste"] = "List",
-  ["Realive v1.5 — métronome encore ON (toggle échoué)."] = "Realive v1.5 — metronome still ON (toggle failed).",
-  ["Realive v1.5 prêt — métronome off."] = "Realive v1.5 ready — metronome off.",
+  ["ReaCues v1.0 — métronome encore ON (toggle échoué)."] = "ReaCues v1.0 — metronome still ON (toggle failed).",
+  ["ReaCues v1.0 prêt — métronome off."] = "ReaCues v1.0 ready — metronome off.",
   ["\" : impossible de créer la piste relais « "] = "\": unable to create relay track \"",
   ["Cycles :"] = "Cycles:",
   ["Oui"] = "Yes",
@@ -1155,7 +1155,7 @@ function X.add_file_item(dest, file, pos, tin, seg, fadein, gain, id, markers)
     -- L'inversion est portée par la source SECTION native de REAPER.
     if X.set_item_reverse then X.set_item_reverse(new, cue.wave_reverse) end
     -- L'adaptation initiale est calculée explicitement depuis le BPM source ;
-    -- ne pas activer C_AUTOSTRETCH sur les items internes de ReaLive.
+    -- ne pas activer C_AUTOSTRETCH sur les items internes de ReaCues.
     reaper.SetMediaItemInfo_Value(new, "C_BEATATTACHMODE", 0)
     reaper.SetMediaItemInfo_Value(new, "C_AUTOSTRETCH", 0)
   end
@@ -1288,7 +1288,7 @@ function X.keepalive_track()
     reaper.InsertTrackAtIndex(n, true)
     tr = reaper.GetTrack(PROJ, n)
     if tr then
-      reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "ReaLive — interne (transport)", true)
+      reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "ReaCues — interne (transport)", true)
       reaper.GetSetMediaTrackInfo_String(tr, "P_EXT:cuelist_internal_keepalive", "1", true)
       reaper.SetMediaTrackInfo_Value(tr, "B_SHOWINMIXER", 0)
       reaper.SetMediaTrackInfo_Value(tr, "I_HEIGHTOVERRIDE", 1)
@@ -4785,7 +4785,7 @@ function X.get_wave(file)
   local ret = reaper.PCM_Source_GetPeaks(src, N / len, 0, nch, N, 0, buf)
   local cnt = math.floor(ret) & 0xFFFFF
   if cnt <= 0 and reaper.PCM_Source_BuildPeaks then
-    -- Certains médias ajoutés par ReaLive n'ont pas encore de peaks. Demander
+    -- Certains médias ajoutés par ReaCues n'ont pas encore de peaks. Demander
     -- une reconstruction, puis refaire la lecture des peaks une fois.
     pcall(reaper.PCM_Source_BuildPeaks, src, 0, true)
     buf.clear()
@@ -5088,7 +5088,7 @@ function X.save_bundle(folder, lua_filename)
   reaper.RecursiveCreateDirectory(root, 0)
   local audio_dir = X.path_join(root, "audiofiles")
   reaper.RecursiveCreateDirectory(audio_dir, 0)
-  local test_path = X.path_join(root, ".realive_bundle_write_test.tmp")
+  local test_path = X.path_join(root, ".reacues_bundle_write_test.tmp")
   local test = io.open(test_path, "wb")
   if not test then return false, X.T("Impossible d'écrire dans le dossier Bundle.") end
   test:close(); os.remove(test_path)
@@ -7228,16 +7228,16 @@ function X.draw_prefs()
     else
       reaper.ImGui_SameLine(ctx)
     end
-    if reaper.ImGui_Button(ctx, X.T("☕ Soutenir ReaLive##support_bmac")) then
+    if reaper.ImGui_Button(ctx, X.T("☕ Soutenir ReaCues##support_bmac")) then
       local url = "https://buymeacoffee.com/joffo"
       if reaper.CF_ShellExecute then
         reaper.CF_ShellExecute(url)
       else
-        reaper.MB(X.T("Pour soutenir ReaLive, ouvre cette adresse dans ton navigateur :\n") .. url, X.T("Soutenir ReaLive"), 0)
+        reaper.MB(X.T("Pour soutenir ReaCues, ouvre cette adresse dans ton navigateur :\n") .. url, X.T("Soutenir ReaCues"), 0)
       end
     end
     if reaper.ImGui_IsItemHovered and reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
-      reaper.ImGui_SetTooltip(ctx, X.T("Ouvrir la page Buy Me a Coffee de ReaLive"))
+      reaper.ImGui_SetTooltip(ctx, X.T("Ouvrir la page Buy Me a Coffee de ReaCues"))
     end
   end
 end
@@ -7573,12 +7573,12 @@ function X.draw()
     local f = nil
     if reaper.JS_Dialog_BrowseForSaveFile then
       local ok, filename = reaper.JS_Dialog_BrowseForSaveFile(
-        prefs.save_bundle == true and X.T("Enregistrer le Bundle ReaLive (nom du fichier Lua)") or X.T("Enregistrer l'ActionList"),
+        prefs.save_bundle == true and X.T("Enregistrer le Bundle ReaCues (nom du fichier Lua)") or X.T("Enregistrer l'ActionList"),
         "", "ActionList.lua", "*.lua")
       if ok and filename and filename ~= "" then f = filename end
     else
       local ok, filename = reaper.GetUserFileNameForRead(
-        "", prefs.save_bundle == true and X.T("Enregistrer le Bundle ReaLive (taper le nom du fichier Lua)") or X.T("Enregistrer l'ActionList (taper le nom et valider)"), "*.lua")
+        "", prefs.save_bundle == true and X.T("Enregistrer le Bundle ReaCues (taper le nom du fichier Lua)") or X.T("Enregistrer l'ActionList (taper le nom et valider)"), "*.lua")
       if ok and filename and filename ~= "" then f = filename end
     end
     if f then
@@ -8176,7 +8176,7 @@ function X.loop()
     if reaper.ImGui_Col_ChildBg then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_ChildBg(), bg_col); pushed_bg = pushed_bg + 1 end
     if reaper.ImGui_Col_PopupBg then reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_PopupBg(), bg_col); pushed_bg = pushed_bg + 1 end
   end
-  local visible, open = reaper.ImGui_Begin(ctx, "Realive v1.5 — Actions##v2", true)
+  local visible, open = reaper.ImGui_Begin(ctx, "ReaCues v1.0 — Actions##v2", true)
   if visible then
     if reaper.ImGui_SetWindowFontScale then reaper.ImGui_SetWindowFontScale(ctx, ui_scale) end
     local draw_ok, draw_err = xpcall(X.draw, debug.traceback)
@@ -8184,7 +8184,7 @@ function X.loop()
     if not draw_ok and draw_err ~= X.last_draw_err then
       X.last_draw_err = draw_err
       status = "Erreur : " .. tostring(draw_err):match("^[^\n]*")
-      reaper.ShowConsoleMsg("[Realive] " .. tostring(draw_err) .. "\n")
+      reaper.ShowConsoleMsg("[ReaCues] " .. tostring(draw_err) .. "\n")
     end
   end
   if pushed_bg > 0 then reaper.ImGui_PopStyleColor(ctx, pushed_bg) end
@@ -8223,8 +8223,8 @@ do
   end)
   st = metro_state()
   status = (st == 1)
-    and X.T("Realive v1.5 — métronome encore ON (toggle échoué).")
-    or X.T("Realive v1.5 prêt — métronome off.")
+    and X.T("ReaCues v1.0 — métronome encore ON (toggle échoué).")
+    or X.T("ReaCues v1.0 prêt — métronome off.")
 end
 
 reaper.defer(X.loop)
