@@ -1,5 +1,5 @@
 -- @description Realive — système de cues pour REAPER
--- @version 1.71
+-- @version 1.72
 -- @author joffo78-hash
 -- @link https://github.com/joffo78-hash/Realive
 -- @about
@@ -11,7 +11,9 @@
 -- Types : AUDIO (fichier), REGION, PRESET, STOP, SNAPSHOT, OSC, MIDI
 
 if not reaper.ImGui_CreateContext then
-  reaper.MB("ReaImGui n'est pas installé.\nInstallez-le via ReaPack.", "ActionList", 0)
+  reaper.MB(reaper.GetExtState("ACTIONLIST", "lang") == "fr"
+    and "ReaImGui n'est pas installé.\nInstallez-le via ReaPack."
+    or "ReaImGui is not installed.\nInstall it via ReaPack.", "ActionList", 0)
   return
 end
 
@@ -24,6 +26,428 @@ local X = {} -- aides regroupées (limite Lua : 200 variables locales)
 
 local EXT = "ACTIONLIST"
 local PROJ = reaper.EnumProjects(-1)
+
+---------------------------------------------------------------- Langue (i18n)
+-- Le code source est écrit en français : X.T("texte français") renvoie la version
+-- anglaise quand la langue active est "en" (défaut), le texte d'origine sinon.
+-- Les suffixes d'ID ImGui (##id, ###id) sont conservés tels quels.
+-- Le choix est mémorisé dans un ExtState global (persistant entre les sessions).
+X.lang = reaper.GetExtState(EXT, "lang")
+if X.lang ~= "fr" and X.lang ~= "en" then X.lang = "en" end
+X.LANG_NAMES = {en = "English", fr = "Français"}
+X.T_cache = {}
+X.EN = {
+  ["ReaImGui n'est pas installé.\nInstallez-le via ReaPack."] = "ReaImGui is not installed.\nInstall it via ReaPack.",
+  ["OSC désactivé : installer/mettre à jour Mavriq Lua Sockets 1.2 via ReaPack."] = "OSC disabled: install/update Mavriq Lua Sockets 1.2 via ReaPack.",
+  ["OSC disponible (Mavriq Lua Sockets : "] = "OSC available (Mavriq Lua Sockets: ",
+  ["OSC désactivé : Mavriq Lua Sockets a été trouvé, mais socket.core n'a pas pu être chargé. Vérifier que la version installée correspond à REAPER et au système."] = "OSC disabled: Mavriq Lua Sockets was found, but socket.core could not be loaded. Check that the installed version matches REAPER and your system.",
+  [" Détail Lua : "] = " Lua detail: ",
+  ["OSC désactivé : fichier natif LuaSocket introuvable. Installer Mavriq Lua Sockets 1.2 via ReaPack."] = "OSC disabled: native LuaSocket file not found. Install Mavriq Lua Sockets 1.2 via ReaPack.",
+  ["Prêt (OSC disponible)."] = "Ready (OSC available).",
+  ["Prêt. "] = "Ready. ",
+  ["Rien à annuler."] = "Nothing to undo.",
+  ["Modification annulée."] = "Change undone.",
+  ["Rien à rétablir."] = "Nothing to redo.",
+  ["Modification rétablie."] = "Change redone.",
+  ["(sans nom)"] = "(unnamed)",
+  ["Pause cue Q%s à %.3f s (source)%s."] = "Pause cue Q%s at %.3f s (source)%s.",
+  ["Reprise cue Q%s à %.3f s (source)."] = "Resume cue Q%s at %.3f s (source).",
+  ["Devamp armé (Q%s) : fin du cycle région%s."] = "Devamp armed (Q%s): end of region cycle%s.",
+  [", puis arrêt"] = ", then stop",
+  ["Devamp armé (Q%s) : fin du passage jusqu'à Lo, puis OUT%s."] = "Devamp armed (Q%s): end of the pass up to Lo, then OUT%s.",
+  ["La lecture n'a pas démarré dans l'onglet source."] = "Playback did not start in the source tab.",
+  ["REGION \"%s\" : région \"%s\" jouée dans son onglet%s%s"] = "REGION \"%s\": region \"%s\" played in its own tab%s%s",
+  ["\" : aucun fichier choisi."] = "\": no file selected.",
+  ["\" : le projet ne contient aucune piste. Ajoute une piste puis réessaie."] = "\": the project has no tracks. Add a track and try again.",
+  ["\" : projet source non ouvert."] = "\": source project not open.",
+  ["\" : région introuvable."] = "\": region not found.",
+  ["\" : piste introuvable."] = "\": track not found.",
+  [" portée à "] = " set to ",
+  [" canaux"] = " channels",
+  ["\" créée"] = "\" created",
+  ["piste \""] = "track \"",
+  ["\" : impossible de créer la piste \""] = "\": unable to create track \"",
+  ["\" : fichier illisible."] = "\": unreadable file.",
+  ["Cue \"%s\" : aucun item exploitable."] = "Cue \"%s\": no usable item.",
+  ["%s \"%s\" : %d item(s) à %.2f s%s%s%s"] = "%s \"%s\": %d item(s) at %.2f s%s%s%s",
+  ["STOP : immédiat (protection anti-clic 3 ms)."] = "STOP: immediate (3 ms anti-click protection).",
+  ["STOP : fondu natif %.1f s (%d item(s))%s"] = "STOP: native fade %.1f s (%d item(s))%s",
+  [" → suppression des items après fondu"] = " → items deleted after the fade",
+  ["STOP : %d item(s) ActionList déjà terminé(s) supprimé(s)."] = "STOP: %d already finished ActionList item(s) deleted.",
+  ["STOP : rien en cours (nettoyage programmé si items restants)."] = "STOP: nothing playing (cleanup scheduled if items remain).",
+  ["STOP : rien en cours."] = "STOP: nothing playing.",
+  ["STOP ciblé immédiat (protection 3 ms) : %d item(s)%s"] = "Targeted STOP, immediate (3 ms protection): %d item(s)%s",
+  [" → suppression"] = " → deletion",
+  [" (items conservés)"] = " (items kept)",
+  ["STOP ciblé : fade de %.1f s, %d item(s)%s"] = "Targeted STOP: %.1f s fade, %d item(s)%s",
+  ["%s : %d cue(s) concernée(s)%s%s."] = "%s: %d cue(s) affected%s%s.",
+  [" — %d cible(s) REGION ignorée(s) (non prises en charge)"] = " — %d REGION target(s) ignored (not supported)",
+  ["DEVAMP : %d cue(s) armée(s)%s."] = "DEVAMP: %d cue(s) armed%s.",
+  [" + snapshot (%d piste(s))"] = " + snapshot (%d track(s))",
+  ["SNAPSHOT \"%s\" : %d piste(s)"] = "SNAPSHOT \"%s\": %d track(s)",
+  ["projet source du snapshot introuvable (fermé ?)"] = "snapshot source project not found (closed?)",
+  [" introuvable"] = " not found",
+  [" : effet "] = ": effect ",
+  [" différent"] = " differs",
+  ["\" : rien de capturé."] = "\": nothing captured.",
+  ["OSC : Mavriq Lua Sockets 1.2 absent ou non chargeable."] = "OSC: Mavriq Lua Sockets 1.2 missing or cannot be loaded.",
+  ["OSC : port invalide."] = "OSC: invalid port.",
+  ["OSC : impossible de créer le socket UDP."] = "OSC: unable to create the UDP socket.",
+  ["OSC : échec d'envoi ("] = "OSC: send failed (",
+  ["\" : port \""] = "\": port \"",
+  ["\" introuvable."] = "\" not found.",
+  ["\" : piste cible introuvable."] = "\": target track not found.",
+  ["MIDI : StuffMIDIMessage indisponible dans cette version de REAPER."] = "MIDI: StuffMIDIMessage is unavailable in this version of REAPER.",
+  ["note %d vel %d, durée %d ms"] = "note %d vel %d, duration %d ms",
+  ["MIDI : type inconnu"] = "MIDI: unknown type",
+  ["Marqueur Q%s détecté, mais aucun cue avec l'ID %s n'existe dans cette ActionList."] = "Marker Q%s detected, but no cue with ID %s exists in this ActionList.",
+  ["Attention : la lecture n'a pas démarré."] = "Warning: playback did not start.",
+  ["Lecture arrêtée : plus aucun média."] = "Playback stopped: no media left.",
+  ["Nettoyage : %d item(s) supprimé(s)."] = "Cleanup: %d item(s) deleted.",
+  ["Pause : aucun média en cours."] = "Pause: no media playing.",
+  ["PAUSE : timeline arrêtée (tu peux revenir en arrière, puis relancer)."] = "PAUSE: timeline stopped (you can go back, then restart).",
+  ["REPRISE."] = "RESUME.",
+  ["Défaut"] = "Default",
+  ["PRESET %d : %d cue(s) concernée(s)%s%s%s."] = "PRESET %d: %d cue(s) affected%s%s%s.",
+  [" — %d cue(s) non jouée(s) ignorée(s)"] = " — %d cue(s) not playing ignored",
+  [" — preset introuvable pour "] = " — preset not found for ",
+  [" : pas de cue suivante."] = ": no next cue.",
+  [" : cue suivante introuvable (ID "] = ": next cue not found (ID ",
+  [" action(s) supprimée(s) (Ctrl/Cmd+Suppr)."] = " action(s) deleted (Ctrl/Cmd+Delete).",
+  ["Sélectionne une ou plusieurs cues par leur titre avant Ctrl/Cmd+C ou X."] = "Select one or more cues by their title before Ctrl/Cmd+C or X.",
+  [" cue(s) coupée(s). Colle avec Ctrl/Cmd+V."] = " cue(s) cut. Paste with Ctrl/Cmd+V.",
+  [" cue(s) copiée(s). Colle avec Ctrl/Cmd+V."] = " cue(s) copied. Paste with Ctrl/Cmd+V.",
+  ["Le presse-papiers des cues est vide."] = "The cue clipboard is empty.",
+  [" cue(s) collée(s) dans « "] = " cue(s) pasted into \"",
+  ["liste active"] = "active list",
+  ["Aucune action sélectionnée."] = "No action selected.",
+  ["projet cible"] = "target project",
+  ["Pistes ciblées dans : "] = "Tracks targeted in: ",
+  ["Capturer les pistes sélectionnées"] = "Capture selected tracks",
+  ["Sélectionne d'abord une ou plusieurs pistes dans REAPER (projet cible)."] = "First select one or more tracks in REAPER (target project).",
+  [" piste(s) capturée(s)."] = " track(s) captured.",
+  ["Capturer toutes les pistes"] = "Capture all tracks",
+  ["Rien de capturé. Sélectionne des pistes, règle-les, puis clique sur Capturer."] = "Nothing captured. Select tracks, set them up, then click Capture.",
+  ["Capturé : %d piste(s). Décoche celles à ignorer :"] = "Captured: %d track(s). Uncheck the ones to ignore:",
+  ["Ce que le snapshot rappelle :"] = "What the snapshot recalls:",
+  ["Armer"] = "Arm",
+  ["FX actif/bypass"] = "FX on/bypass",
+  [" (actif)"] = " (active)",
+  ["Paramètres FX"] = "FX parameters",
+  ["Détail des effets"] = "Effects detail",
+  ["Aucun fichier audio."] = "No audio file.",
+  ["PCM_Source_BuildPeaks n'est pas disponible dans cette version de REAPER."] = "PCM_Source_BuildPeaks is not available in this version of REAPER.",
+  ["REAPER ne peut pas ouvrir la source audio : "] = "REAPER cannot open the audio source: ",
+  ["Échec au démarrage de la génération des peaks."] = "Failed to start peaks generation.",
+  ["Échec pendant la génération des peaks."] = "Failed during peaks generation.",
+  ["La génération des peaks n'a pas terminé dans le délai prévu."] = "Peaks generation did not finish within the expected time.",
+  ["Échec de finalisation du fichier peaks."] = "Failed to finalize the peaks file.",
+  ["REAPER n'a pas pu reconstruire les peaks."] = "REAPER could not rebuild the peaks.",
+  ["Peaks reconstruits, mais l'ancien .reapeaks n'a pas pu être supprimé (fichier verrouillé ?)."] = "Peaks rebuilt, but the old .reapeaks could not be deleted (file locked?).",
+  ["Peaks reconstruits. Aucun .reapeaks à côté du fichier (cache de peaks alternatif ?) : l'ancien cache n'a pas pu être supprimé."] = "Peaks rebuilt. No .reapeaks next to the file (alternate peaks cache?): the old cache could not be deleted.",
+  ["Forme d'onde régénérée : "] = "Waveform regenerated: ",
+  ["Fichier illisible."] = "Unreadable file.",
+  ["Durée inconnue (sous-projet ?) : pas de forme d'onde."] = "Unknown duration (subproject?): no waveform.",
+  ["Forme d'onde indisponible : REAPER n'a pas fourni de peaks après tentative de reconstruction."] = "Waveform unavailable: REAPER did not provide peaks after a rebuild attempt.",
+  ["Fichier chargé, mais waveform indisponible : "] = "File loaded, but waveform unavailable: ",
+  ["Lecture impossible : "] = "Cannot read: ",
+  ["Écriture impossible : "] = "Cannot write: ",
+  ["Écriture interrompue."] = "Write interrupted.",
+  ["%d fichier(s) audio manquant(s) — choisir le dossier de recherche"] = "%d missing audio file(s) — choose the search folder",
+  ["Plusieurs fichiers nommés "] = "Several files named ",
+  [" — choisir le bon"] = " — choose the right one",
+  ["ActionList ouverte : %d média(s) manquant(s), %d réparé(s). Utilise Open après avoir regroupé les médias pour relancer la recherche."] = "ActionList opened: %d media file(s) missing, %d repaired. Use Open after consolidating the media to search again.",
+  ["ActionList ouverte : tous les médias retrouvés (%d chemin(s) corrigé(s))."] = "ActionList opened: all media found (%d path(s) fixed).",
+  ["Dossier Bundle non sélectionné."] = "Bundle folder not selected.",
+  ["Cette version de REAPER ne permet pas de créer le dossier Bundle."] = "This version of REAPER cannot create the Bundle folder.",
+  ["Impossible d'écrire dans le dossier Bundle."] = "Cannot write to the Bundle folder.",
+  ["Impossible de préparer une copie de l'ActionList."] = "Unable to prepare a copy of the ActionList.",
+  ["Média introuvable : "] = "Media not found: ",
+  ["Impossible d'enregistrer "] = "Unable to save ",
+  [" dans le Bundle."] = " in the Bundle.",
+  ["Bundle créé : %s (fichier %s, %d fichier(s) audio copié(s), %d fichier(s) .reapeaks copié(s))."] = "Bundle created: %s (file %s, %d audio file(s) copied, %d .reapeaks file(s) copied).",
+  [" Attention : %d fichier(s) .reapeaks absent(s) ou non copié(s) ; REAPER devra les régénérer."] = " Warning: %d .reapeaks file(s) missing or not copied; REAPER will have to regenerate them.",
+  ["Fichier audio chargé par glisser-déposer."] = "Audio file loaded by drag and drop.",
+  ["Format non reconnu : dépose un fichier audio ou vidéo compatible avec REAPER."] = "Unrecognized format: drop an audio or video file compatible with REAPER.",
+  ["Glisser-déposer de fichiers indisponible : mets ReaImGui à jour via ReaPack."] = "File drag and drop unavailable: update ReaImGui via ReaPack.",
+  ["Diagnostic dépôt : titre survolé, mais la cible ImGui n'est pas activée."] = "Drop diagnostic: title hovered, but the ImGui target is not active.",
+  ["Diagnostic dépôt : cible titre active, attente du fichier…"] = "Drop diagnostic: title target active, waiting for the file…",
+  ["Diagnostic dépôt : payload accepté, nombre de fichiers = "] = "Drop diagnostic: payload accepted, number of files = ",
+  [" fichier(s) ignoré(s) : format non reconnu)"] = " file(s) ignored: unrecognized format)",
+  ["Cue fichier créée : "] = "File cue created: ",
+  [" (première piste du projet)."] = " (first track of the project).",
+  ["Cue créée : "] = "Cue created: ",
+  [", mais le projet ne contient aucune piste."] = ", but the project has no tracks.",
+  [" cues créées"] = " cues created",
+  [" (première piste du projet)"] = " (first track of the project)",
+  [" (le projet ne contient aucune piste)"] = " (the project has no tracks)",
+  ["Réglages de lecture (gain, pan, vitesse, pitch, reverse, tempo)"] = "Playback settings (gain, pan, speed, pitch, reverse, tempo)",
+  ["Stretch au tempo"] = "Stretch to tempo",
+  ["Vitesse"] = "Speed",
+  ["Pitch (demi-tons)"] = "Pitch (semitones)",
+  ["%+.2f demi-tons"] = "%+.2f semitones",
+  ["Pitch lié à la vitesse"] = "Pitch linked to speed",
+  ["Lier la hauteur à la vitesse"] = "Link pitch to speed",
+  ["Ajouter"] = "Add",
+  [" ajouté (copie de "] = " added (copy of ",
+  ["Renommer le preset"] = "Rename preset",
+  ["Renommer"] = "Rename",
+  ["Supprimer"] = "Delete",
+  ["Impossible de supprimer le dernier preset de la cue."] = "Cannot delete the cue's last preset.",
+  [" supprimé."] = " deleted.",
+  ["Nom"] = "Name",
+  ["Laisser vide = nom automatique"] = "Leave empty = automatic name",
+  ["Valider"] = "Confirm",
+  ["Annuler"] = "Cancel",
+  ["Rappelé au lancement :"] = "Recalled on launch:",
+  ["Les réglages ci-dessus modifient le preset sélectionné. ▶ = preset rappelé à chaque lancement de la cue (par défaut 0)."] = "The settings above modify the selected preset. ▶ = preset recalled each time the cue is launched (default 0).",
+  ["Stretch : BPM source requis (métadonnées ou nom du fichier, ex. 120bpm). Sans BPM détecté, la vitesse reste inchangée."] = "Stretch: source BPM required (metadata or file name, e.g. 120bpm). Without a detected BPM, the speed is unchanged.",
+  ["Une action PRESET (+ Preset) peut rappeler un autre preset sur une cue en cours de lecture, avec une transition."] = "A PRESET action (+ Preset) can recall another preset on a playing cue, with a transition.",
+  ["Aucun fichier chargé. Glisse un fichier audio ou vidéo dans la zone ci-dessous."] = "No file loaded. Drag an audio or video file into the area below.",
+  ["Charger un fichier audio..."] = "Load an audio file...",
+  ["Fichier audio"] = "Audio file",
+  ["Déposer le fichier audio ici"] = "Drop the audio file here",
+  ["Remplacer le fichier..."] = "Replace file...",
+  ["Remplacer le fichier audio"] = "Replace audio file",
+  ["Supprimer fichier"] = "Delete file",
+  ["Régénérer forme d'onde"] = "Regenerate waveform",
+  ["Reconstruire la forme d'onde"] = "Rebuild waveform",
+  ["Reconstruction des peaks demandée à REAPER : "] = "Peaks rebuild requested from REAPER: ",
+  ["Entrée (s)"] = "In (s)",
+  ["Sortie (s)"] = "Out (s)",
+  ["Tout"] = "All",
+  ["Boucle"] = "Loop",
+  ["Reprendre"] = "Resume",
+  ["Devamp déjà armé."] = "Devamp already armed.",
+  ["Devamp : lance d'abord la cue en boucle."] = "Devamp: first start the cue in loop mode.",
+  ["Pause : aucune lecture en cours pour cette cue."] = "Pause: this cue is not playing.",
+  ["Ctrl + glisser : navigation dans la forme d'onde."] = "Ctrl + drag: navigate the waveform.",
+  ["Lecture déplacée à %.3f s (source)."] = "Playback moved to %.3f s (source).",
+  ["Clic : la cue doit être en lecture pour déplacer sa tête de lecture."] = "Click: the cue must be playing to move its playhead.",
+  ["Déplacement du marqueur "] = "Moving marker ",
+  ["Position des marqueurs enregistrée."] = "Marker positions saved.",
+  ["Fondus modifiés : pris en compte au prochain lancement de la cue."] = "Fades modified: applied the next time the cue is launched.",
+  ["Courbe du fade in"] = "Fade in curve",
+  ["Courbe du fade out"] = "Fade out curve",
+  ["Linéaire"] = "Linear",
+  ["Rapide au début (logarithmique)"] = "Fast at start (logarithmic)",
+  ["Lent au début (exponentielle)"] = "Slow at start (exponential)",
+  ["Fondus sur la forme d'onde : carré = durée  |  point central fixe = glisser vers le haut/bas pour la courbure (exp ↔ log)  |  clic droit = préréglages"] = "Fades on the waveform: square = duration  |  fixed center point = drag up/down for curvature (exp ↔ log)  |  right-click = presets",
+  ["Clic = tête de lecture  |  Alt+clic = courbe  |  Ctrl+clic = supprimer un point"] = "Click = playhead  |  Alt+click = curve  |  Ctrl+click = delete a point",
+  ["Réinitialiser la courbe"] = "Reset curve",
+  ["Marqueurs de la source (temps en secondes)"] = "Source markers (time in seconds)",
+  ["Ajouter marqueur"] = "Add marker",
+  ["Marqueur créé à %.3f s : saisis l'ID (ex. Q3) ou clique « Capturer cues »."] = "Marker created at %.3f s: enter the ID (e.g. Q3) or click \"Capture cues\".",
+  ["Capturer cues (%d) → %s"] = "Capture cues (%d) → %s",
+  ["aucun marqueur"] = "no marker",
+  ["Crée un marqueur (Ajouter marqueur) ou clique dans le champ du marqueur à renseigner."] = "Create a marker (Add marker) or click in the marker field to fill in.",
+  ["Aucune action sélectionnée : clique d'abord le TITRE d'une ligne dans la liste (Ctrl/Maj pour plusieurs)."] = "No action selected: first click the TITLE of a row in the list (Ctrl/Shift for several).",
+  [" action(s) capturée(s) dans le marqueur "] = " action(s) captured in marker ",
+  ["Clique d'abord dans le champ du marqueur à supprimer."] = "First click in the field of the marker to delete.",
+  ["Sélection : "] = "Selection: ",
+  ["   |   Marqueur visé : "] = "   |   Target marker: ",
+  ["Aucun marqueur."] = "No marker.",
+  ["Marqueur supprimé de la cue."] = "Marker removed from the cue.",
+  ["Seuls les marqueurs situés entre IN et OUT seront copiés sur l'item."] = "Only markers located between IN and OUT will be copied onto the item.",
+  ["Lier un état de pistes à cette action"] = "Link a track state to this action",
+  [" (non ouvert)"] = " (not open)",
+  ["Projet source du snapshot"] = "Snapshot source project",
+  ["arrêter"] = "stop",
+  ["mettre en pause / reprendre"] = "pause / resume",
+  ["passer en Devamp"] = "switch to Devamp",
+  ["modifier avec un preset"] = "modify with a preset",
+  ["cibler"] = "target",
+  ["IDs des cues à "] = "IDs of the cues to ",
+  [" (ex. Q1,Q8). Les IDs peuvent appartenir à n'importe quel onglet."] = " (e.g. Q1,Q8). IDs can belong to any tab.",
+  ["IDs ciblés"] = "Target IDs",
+  ["Format invalide : utilise Q1,Q8 (IDs numériques séparés par des virgules)."] = "Invalid format: use Q1,Q8 (numeric IDs separated by commas).",
+  ["Attention : les cibles REGION "] = "Warning: REGION targets ",
+  [" ne seront pas mises en pause. Retire-les de la liste ; seules les cues AUDIO sont prises en charge."] = " will not be paused. Remove them from the list; only AUDIO cues are supported.",
+  ["PAUSE / UNPAUSE : seules les cues AUDIO sont prises en charge. Les régions seront ignorées."] = "PAUSE / UNPAUSE: only AUDIO cues are supported. Regions will be ignored.",
+  ["Capturer les cues sélectionnées (tous onglets)"] = "Capture selected cues (all tabs)",
+  ["Aucune cue sélectionnée dans les onglets."] = "No cue selected in the tabs.",
+  [" cue(s) ciblée(s)."] = " cue(s) targeted.",
+  ["Toutes les cues"] = "All cues",
+  ["Cues ciblées :"] = "Targeted cues:",
+  ["(ID introuvable)"] = "(ID not found)",
+  ["(introuvable)"] = "(not found)",
+  ["(onglet inconnu)"] = "(unknown tab)",
+  ["Cible : toutes les cues (aucune liste d'IDs saisie)."] = "Target: all cues (no ID list entered).",
+  ["Crossfade entre régions (s)"] = "Crossfade between regions (s)",
+  ["Utilisé seulement si la cible après Devamp est une REGION. 0 = sans crossfade."] = "Only used if the target after Devamp is a REGION. 0 = no crossfade.",
+  ["Pour une source AUDIO, le Devamp sort sur sa propre boucle ; la cible démarre ensuite sans crossfade de région."] = "For an AUDIO source, Devamp exits on its own loop; the target then starts without a region crossfade.",
+  ["Enchaîner après le Devamp (optionnel) :"] = "Chain after Devamp (optional):",
+  ["La cible peut être une cue AUDIO ou REGION. Le crossfade ne s'applique qu'à REGION → REGION."] = "The target can be an AUDIO or REGION cue. Crossfade only applies to REGION → REGION.",
+  ["Cible après Devamp"] = "Target after Devamp",
+  ["La cible doit être une cue AUDIO ou REGION (ex. Q12)."] = "The target must be an AUDIO or REGION cue (e.g. Q12).",
+  ["Format : Q12 (un seul ID de cue AUDIO ou REGION)."] = "Format: Q12 (a single AUDIO or REGION cue ID).",
+  ["Capturer la sélection comme cible après Devamp"] = "Capture selection as target after Devamp",
+  ["Devamp enchaînera vers Q"] = "Devamp will chain to Q",
+  ["Sélectionnez exactement une cue AUDIO ou REGION comme cible après Devamp."] = "Select exactly one AUDIO or REGION cue as the target after Devamp.",
+  ["Après Devamp → Q%s — %s (%s)"] = "After Devamp → Q%s — %s (%s)",
+  ["Titre auto"] = "Auto title",
+  ["Titre automatique restauré."] = "Automatic title restored.",
+  ["(aucun fichier)"] = "(no file)",
+  ["Choisir un fichier..."] = "Choose a file...",
+  ["Piste cible"] = "Target track",
+  ["Courbe du fade"] = "Fade curve",
+  ["Léger  %.2f  Prononcé"] = "Subtle  %.2f  Pronounced",
+  ["0 = linéaire ; augmentez le curseur pour accentuer la courbe des fades de cette cue."] = "0 = linear; increase the slider to accentuate the fade curve of this cue.",
+  ["AUTO : délai depuis le déclenchement"] = "AUTO: delay from trigger",
+  ["FOLLOW : attendre la fin puis le délai"] = "FOLLOW: wait for the end, then the delay",
+  ["AUTO et FOLLOW sont exclusifs. DELAY s'applique au mode choisi."] = "AUTO and FOLLOW are mutually exclusive. DELAY applies to the chosen mode.",
+  ["Snapshot lié"] = "Linked snapshot",
+  ["Lier le temps du snapshot au fade in"] = "Link snapshot time to fade in",
+  ["Projet source"] = "Source project",
+  ["Région"] = "Region",
+  ["Copier les items dans ce projet"] = "Copy items into this project",
+  ["La région joue dans son propre onglet (transport + FX du projet source)."] = "The region plays in its own tab (transport + FX of the source project).",
+  ["Boucle (région entière)"] = "Loop (entire region)",
+  ["Boucle : revient au début de la région à la fin. DEVAMP = terminer le cycle en cours puis s'arrêter."] = "Loop: returns to the start of the region at the end. DEVAMP = finish the current cycle, then stop.",
+  ["Cycles : "] = "Cycles: ",
+  ["Réglages"] = "Settings",
+  ["Durée du fade (s)"] = "Fade duration (s)",
+  ["0 = arrêt immédiat (affiché STOP) ; > 0 = FADEOUT."] = "0 = immediate stop (shown as STOP); > 0 = FADEOUT.",
+  ["Unpause (reprendre les cues en pause)"] = "Unpause (resume paused cues)",
+  ["Fade in après unpause (s)"] = "Fade in after unpause (s)",
+  ["Fade out avant pause (s)"] = "Fade out before pause (s)",
+  ["Fade out limité à %.0f s (planification à l'avance)."] = "Fade out limited to %.0f s (scheduled in advance).",
+  ["Arme le Devamp sur les cues ciblées : elles finissent leur passage jusqu'à Lo puis filent vers OUT."] = "Arms Devamp on the targeted cues: they finish their pass up to Lo, then run out to OUT.",
+  ["Lier le temps du snapshot à la durée du fade"] = "Link snapshot time to fade duration",
+  ["Lier le temps du snapshot au fade"] = "Link snapshot time to fade",
+  ["Rappelle un preset de réglages de lecture sur les cues AUDIO ciblées qui jouent en ce moment."] = "Recalls a playback settings preset on the targeted AUDIO cues that are currently playing.",
+  ["N° du preset à rappeler"] = "Preset no. to recall",
+  ["Temps de transition (s)"] = "Transition time (s)",
+  ["Q%s — %s : preset %d « %s »"] = "Q%s — %s: preset %d \"%s\"",
+  ["Q%s — %s : le preset %d n'existe pas pour cette cue."] = "Q%s — %s: preset %d does not exist for this cue.",
+  ["Q%s : cible ignorée (seules les cues AUDIO ont des presets)."] = "Q%s: target ignored (only AUDIO cues have presets).",
+  ["Sans cible : toutes les cues AUDIO en cours de lecture."] = "No target: all AUDIO cues currently playing.",
+  ["(choisir un port)"] = "(choose a port)",
+  ["Port OSC"] = "OSC port",
+  ["Adresse"] = "Address",
+  ["Arguments (séparés par des espaces) :"] = "Arguments (separated by spaces):",
+  ["LuaSocket manquant → l'envoi OSC est désactivé."] = "LuaSocket missing → OSC sending is disabled.",
+  ["Canal (1-16)"] = "Channel (1-16)",
+  ["Valeur"] = "Value",
+  ["Supprimer : Ctrl/Cmd + clic sur le N° de la ligne."] = "Delete: Ctrl/Cmd + click on the row number.",
+  ["Préférences générales"] = "General preferences",
+  ["Arrêter la lecture quand plus aucun média n'est joué"] = "Stop playback when no media is playing anymore",
+  ["Auto-stop transport : ACTIVÉ"] = "Transport auto-stop: ON",
+  ["Auto-stop transport : DÉSACTIVÉ"] = "Transport auto-stop: OFF",
+  ["Courbe du STOP global"] = "Global STOP curve",
+  ["Logarithmique  %.2f  Exponentiel"] = "Logarithmic  %.2f  Exponential",
+  ["À gauche : baisse rapide du niveau. Au centre : linéaire. À droite : niveau maintenu puis chute en fin de fade. La durée reste inchangée."] = "Left: fast level drop. Center: linear. Right: level held, then drops at the end of the fade. The duration is unchanged.",
+  ["Une nouvelle cue remplace celle qui joue déjà sur la même piste"] = "A new cue replaces the one already playing on the same track",
+  ["Marge (ms)"] = "Margin (ms)",
+  ["Ports OSC (illimités)"] = "OSC ports (unlimited)",
+  ["+ Ajouter un port OSC"] = "+ Add an OSC port",
+  ["Mavriq Lua Sockets 1.2 non détecté → l'envoi OSC est désactivé."] = "Mavriq Lua Sockets 1.2 not detected → OSC sending is disabled.",
+  ["Vérifie dans ReaPack que Mavriq Lua Sockets est installé en version 1.2."] = "Check in ReaPack that Mavriq Lua Sockets version 1.2 is installed.",
+  ["Apparence de l’interface"] = "Interface appearance",
+  ["Réglages de couleur, de fond et de zoom"] = "Color, background and zoom settings",
+  ["Fond : noir → blanc"] = "Background: black → white",
+  ["Zoom interface"] = "Interface zoom",
+  ["Couleur des objets bleus de l’interface"] = "Color of the interface's blue objects",
+  ["Couleur des objets bleus"] = "Blue objects color",
+  ["☕ Soutenir ReaLive"] = "☕ Support ReaLive",
+  ["Pour soutenir ReaLive, ouvre cette adresse dans ton navigateur :\n"] = "To support ReaLive, open this address in your browser:\n",
+  ["Soutenir ReaLive"] = "Support ReaLive",
+  ["Ouvrir la page Buy Me a Coffee de ReaLive"] = "Open ReaLive's Buy Me a Coffee page",
+  ["Liste active : "] = "Active list: ",
+  ["Onglets réorganisés."] = "Tabs reordered.",
+  ["Nouvel onglet créé."] = "New tab created.",
+  ["Il faut conserver au moins un onglet."] = "At least one tab must be kept.",
+  ["Vider liste"] = "Clear list",
+  ["Vider uniquement la liste active « "] = "Clear only the active list \"",
+  ["ActionList — Vider liste"] = "ActionList — Clear list",
+  ["Liste active vidée. Les autres onglets sont conservés."] = "Active list cleared. The other tabs are kept.",
+  ["Onglet renommé."] = "Tab renamed.",
+  ["Confirmer suppression de « "] = "Confirm deletion of \"",
+  ["Onglet supprimé."] = "Tab deleted.",
+  [" »."] = "\".",
+  [" » ?"] = "\"?",
+  ["Reprendre tout là où c'était"] = "Resume everything where it left off",
+  ["Pause : arrête la timeline (retour en arrière possible), régions d'autres projets comprises"] = "Pause: stops the timeline (you can go back), including regions from other projects",
+  ["Créer une nouvelle session ?\nToutes les listes et tous leurs onglets seront vidés."] = "Create a new session?\nAll lists and all their tabs will be cleared.",
+  ["ActionList — Nouvelle session"] = "ActionList — New session",
+  ["Toutes les listes ont été vidées."] = "All lists have been cleared.",
+  ["Ouvrir une ActionList"] = "Open an ActionList",
+  ["ActionList chargée : "] = "ActionList loaded: ",
+  ["Fichier invalide : "] = "Invalid file: ",
+  ["Impossible d'analyser : "] = "Unable to parse: ",
+  ["Impossible d'ouvrir : "] = "Unable to open: ",
+  ["Enregistrer le Bundle ReaLive (nom du fichier Lua)"] = "Save the ReaLive Bundle (Lua file name)",
+  ["Enregistrer le Bundle ReaLive (taper le nom du fichier Lua)"] = "Save the ReaLive Bundle (type the Lua file name)",
+  ["Enregistrer l'ActionList (taper le nom et valider)"] = "Save the ActionList (type the name and confirm)",
+  ["Enregistrer l'ActionList"] = "Save the ActionList",
+  ["ActionList enregistrée : "] = "ActionList saved: ",
+  ["Impossible d'écrire : "] = "Cannot write: ",
+  ["STOP (Échap)"] = "STOP (Esc)",
+  ["Titre"] = "Title",
+  ["Statut"] = "Status",
+  ["N°"] = "#",
+  ["Liste vide. Ajoute une action avec les boutons +."] = "Empty list. Add an action with the + buttons.",
+  ["Cue introuvable "] = "Cue not found ",
+  ["Renommage annulé."] = "Rename cancelled.",
+  ["Renommé : "] = "Renamed: ",
+  ["En lecture : cliquer pour arrêter"] = "Playing: click to stop",
+  ["En pause : cliquer pour reprendre"] = "Paused: click to resume",
+  ["En boucle : cliquer pour sortir de la boucle (devamp) ; stop s'il n'y a pas de boucle"] = "Looping: click to exit the loop (devamp); stop if there is no loop",
+  ["Piste de Q"] = "Track of Q",
+  [" piste(s)"] = " track(s)",
+  ["toutes"] = "all",
+  ["(origine)"] = "(original)",
+  ["(piste d'origine)"] = "(original track)",
+  ["(piste)"] = "(track)",
+  ["(choisir)"] = "(choose)",
+  [" [dossier]"] = " [folder]",
+  ["(aucune)"] = "(none)",
+  ["Marqueur "] = "Marker ",
+  ["marqueur "] = "marker ",
+  ["Temps"] = "Time",
+  ["Forme d'onde"] = "Waveform",
+  ["Prochaine : "] = "Next: ",
+  ["Action supprimée : "] = "Action deleted: ",
+  ["Sélection globale : "] = "Global selection: ",
+  ["Vider la sélection"] = "Clear selection",
+  ["Paramètres de l'action sélectionnée"] = "Selected action settings",
+  ["Liste 1"] = "List 1",
+  ["Liste "] = "List ",
+  ["Liste"] = "List",
+  ["Realive v1.5 — métronome encore ON (toggle échoué)."] = "Realive v1.5 — metronome still ON (toggle failed).",
+  ["Realive v1.5 prêt — métronome off."] = "Realive v1.5 ready — metronome off.",
+  ["\" : impossible de créer la piste relais « "] = "\": unable to create relay track \"",
+  ["Cycles :"] = "Cycles:",
+  ["Oui"] = "Yes",
+  ["Non"] = "No",
+  ["MIDI \"%s\" → « %s » via relais « %s » (%s, canal %d)"] = "MIDI \"%s\" → \"%s\" via relay \"%s\" (%s, channel %d)",
+  ["fichier %.2f s  |  IN→OUT %.2f s  |  Li→Lo %.2f s"] = "file %.2f s  |  IN→OUT %.2f s  |  Li→Lo %.2f s",
+  ["Langue"] = "Language",
+}
+
+function X.T(s)
+  if X.lang ~= "en" then return s end
+  local c = X.T_cache[s]
+  if c then return c end
+  local en = X.EN[s]
+  if not en then
+    local base, suffix = s:match("^(.-)(##.*)$")
+    if base and base ~= "" and X.EN[base] then en = X.EN[base] .. suffix end
+  end
+  en = en or s
+  X.T_cache[s] = en
+  return en
+end
+
+-- Nom d'onglet affiché : « Liste N » / « List N » suivent la langue choisie.
+function X.dn(name)
+  if type(name) ~= "string" then return name end
+  local n = name:match("^Liste (%d+)$") or name:match("^List (%d+)$")
+  if n then return X.T("Liste ") .. n end
+  if name == "Liste" or name == "List" then return X.T("Liste") end
+  return name
+end
+
 
 -- MIDI via piste relais + Virtual Keyboard (StuffMIDIMessage).
 -- Une seule piste "ActionList MIDI" écoute le VKB ; des sends MIDI only
@@ -40,7 +464,7 @@ local wave_rect_x1, wave_rect_y1, wave_rect_x2, wave_rect_y2 = nil, nil, nil, ni
 ---------------------------------------------------------------- OSC (Mavriq Lua Sockets)
 local socket, osc_encode
 local has_socket = false
-local socket_init_status = "OSC désactivé : installer/mettre à jour Mavriq Lua Sockets 1.2 via ReaPack."
+local socket_init_status = X.T("OSC désactivé : installer/mettre à jour Mavriq Lua Sockets 1.2 via ReaPack.")
 
 do
   local resource = reaper.GetResourcePath()
@@ -82,7 +506,7 @@ do
     if ok and type(sock) == "table" and type(sock.udp) == "function" then
       socket = sock
       has_socket = true
-      socket_init_status = "OSC disponible (Mavriq Lua Sockets : " .. socket_root .. ")."
+      socket_init_status = X.T("OSC disponible (Mavriq Lua Sockets : ") .. socket_root .. ")."
       osc_encode = function(address, args)
         local function pad(s)
           local n = 4 - (#s % 4)
@@ -109,31 +533,31 @@ do
         return pad(msg) .. pad(tags) .. data
       end
     else
-      socket_init_status = "OSC désactivé : Mavriq Lua Sockets a été trouvé, mais socket.core n'a pas pu être chargé. Vérifier que la version installée correspond à REAPER et au système."
+      socket_init_status = X.T("OSC désactivé : Mavriq Lua Sockets a été trouvé, mais socket.core n'a pas pu être chargé. Vérifier que la version installée correspond à REAPER et au système.")
       if not ok then
-        socket_init_status = socket_init_status .. " Détail Lua : " .. tostring(sock)
+        socket_init_status = socket_init_status .. X.T(" Détail Lua : ") .. tostring(sock)
       end
     end
   else
-    socket_init_status = "OSC désactivé : fichier natif LuaSocket introuvable. Installer Mavriq Lua Sockets 1.2 via ReaPack."
+    socket_init_status = X.T("OSC désactivé : fichier natif LuaSocket introuvable. Installer Mavriq Lua Sockets 1.2 via ReaPack.")
   end
 end
 
 ---------------------------------------------------------------- État
 local actions, next_id = {}, 1
 -- Cue lists (onglets). `actions` reste un alias de la liste active pour préserver l'éditeur existant.
-local tabs = {{name = "Liste 1", actions = actions}}
+local tabs = {{name = X.T("Liste 1"), actions = actions}}
 local active_tab = 1
 local tab_name_edit, tab_name_buffer = nil, ""
 local pending_delete_tab = nil
 local cue_clipboard, clipboard_cut = nil, false
 function X.sync_active_tab()
-  if not tabs or #tabs == 0 then tabs = {{name = "Liste 1", actions = {}}} end
+  if not tabs or #tabs == 0 then tabs = {{name = X.T("Liste 1"), actions = {}}} end
   active_tab = math.max(1, math.min(active_tab or 1, #tabs))
   actions = tabs[active_tab].actions
 end
 function X.new_tab_name()
-  return "Liste " .. tostring(#tabs + 1)
+  return X.T("Liste ") .. tostring(#tabs + 1)
 end
 function X.clone_table(value)
   if type(value) ~= "table" then return value end
@@ -143,7 +567,7 @@ function X.clone_table(value)
 end
 local selected = nil -- cue préparée pour GO/clavier
 local picked, pick_anchor = {}, nil
-local status = has_socket and "Prêt (OSC disponible)." or ("Prêt. " .. socket_init_status)
+local status = has_socket and X.T("Prêt (OSC disponible).") or (X.T("Prêt. ") .. socket_init_status)
 local file_drop_api_warning_shown = false
 local margin = tonumber(reaper.GetExtState(EXT, "margin")) or 200
 local fades, morphs = {}, {}
@@ -309,13 +733,13 @@ function X.restore_history_state(data)
   next_id = d.next_id or 1
   if type(d.tabs) == "table" and #d.tabs > 0 then
     tabs = d.tabs
-    for _, tab in ipairs(tabs) do tab.name = tab.name or "Liste"; tab.actions = tab.actions or {} end
+    for _, tab in ipairs(tabs) do tab.name = tab.name or X.T("Liste"); tab.actions = tab.actions or {} end
     active_tab = d.active_tab or 1
     if type(d.actions) == "table" and tabs[active_tab] then tabs[active_tab].actions = d.actions end
     X.sync_active_tab()
   else
     actions = d.actions or {}
-    tabs = {{name = "Liste 1", actions = actions}}
+    tabs = {{name = X.T("Liste 1"), actions = actions}}
     active_tab = 1
     X.sync_active_tab()
   end
@@ -333,17 +757,17 @@ function X.restore_history_state(data)
 end
 
 function X.undo_change()
-  if #undo_stack == 0 then status = "Rien à annuler."; return end
+  if #undo_stack == 0 then status = X.T("Rien à annuler."); return end
   redo_stack[#redo_stack + 1] = X.current_data_string()
   local previous = table.remove(undo_stack)
-  if X.restore_history_state(previous) then status = "Modification annulée." end
+  if X.restore_history_state(previous) then status = X.T("Modification annulée.") end
 end
 
 function X.redo_change()
-  if #redo_stack == 0 then status = "Rien à rétablir."; return end
+  if #redo_stack == 0 then status = X.T("Rien à rétablir."); return end
   undo_stack[#undo_stack + 1] = X.current_data_string()
   local following = table.remove(redo_stack)
-  if X.restore_history_state(following) then status = "Modification rétablie." end
+  if X.restore_history_state(following) then status = X.T("Modification rétablie.") end
 end
 
 function X.load_data()
@@ -356,13 +780,13 @@ function X.load_data()
         next_id  = d.next_id or 1
         if type(d.tabs) == "table" and #d.tabs > 0 then
           tabs = d.tabs
-          for _, tab in ipairs(tabs) do tab.name = tab.name or "Liste"; tab.actions = tab.actions or {} end
+          for _, tab in ipairs(tabs) do tab.name = tab.name or X.T("Liste"); tab.actions = tab.actions or {} end
           active_tab = d.active_tab or 1
           if type(d.actions) == "table" and tabs[active_tab] then tabs[active_tab].actions = d.actions end
           X.sync_active_tab()
         else
           actions = d.actions or {}
-          tabs = {{name = "Liste 1", actions = actions}}
+          tabs = {{name = X.T("Liste 1"), actions = actions}}
           active_tab = 1
           X.sync_active_tab()
         end
@@ -480,7 +904,7 @@ function X.project_label(proj)
     local name = reaper.GetProjectName(proj, "")
     if name and name ~= "" then return name end
   end
-  return "(sans nom)"
+  return X.T("(sans nom)")
 end
 
 function X.other_projects()
@@ -492,7 +916,7 @@ function X.other_projects()
       fn = fn or ""
       list[#list+1] = {
         proj = p, fn = fn,
-        label = (fn ~= "" and (fn:match("([^/\\]+)$") or fn)) or "(sans nom)"
+        label = (fn ~= "" and (fn:match("([^/\\]+)$") or fn)) or X.T("(sans nom)")
       }
     end
     i = i + 1
@@ -1098,7 +1522,7 @@ function X.pause_run(id, fade)
     end
     reaper.UpdateArrange()
   end
-  status = string.format("Pause cue Q%s à %.3f s (source)%s.", tostring(id), src_end,
+  status = string.format(X.T("Pause cue Q%s à %.3f s (source)%s."), tostring(id), src_end,
     F > 0 and string.format(", fade out %.1f s", F) or "")
   return true
 end
@@ -1149,7 +1573,7 @@ function X.resume_run(id, fade)
   end
   r.paused = false
   r.pause_src, r.pause_proj = nil, nil
-  status = string.format("Reprise cue Q%s à %.3f s (source).", tostring(id), src)
+  status = string.format(X.T("Reprise cue Q%s à %.3f s (source)."), tostring(id), src)
   return true
 end
 
@@ -1188,10 +1612,10 @@ function X.devamp_run(id, next_id, crossfade)
       devamp_flags[id] = true
       devamp_flags[tostring(id)] = true
       if r.region_loop then
-        status = string.format("Devamp armé (Q%s) : fin du cycle région%s.",
-          tostring(id), next_id and (" → Q"..tostring(next_id)) or ", puis arrêt")
+        status = string.format(X.T("Devamp armé (Q%s) : fin du cycle région%s."),
+          tostring(id), next_id and (" → Q"..tostring(next_id)) or X.T(", puis arrêt"))
       else
-        status = string.format("Devamp armé (Q%s) : fin du passage jusqu'à Lo, puis OUT%s.",
+        status = string.format(X.T("Devamp armé (Q%s) : fin du passage jusqu'à Lo, puis OUT%s."),
           tostring(id), next_id and (" → Q"..tostring(next_id)) or "")
       end
       return true
@@ -1206,8 +1630,8 @@ function X.devamp_run(id, next_id, crossfade)
     er.devamp_transition_started = false
     devamp_flags[id] = true
     devamp_flags[tostring(id)] = true
-    status = string.format("Devamp armé (Q%s) : fin du cycle région%s.",
-      tostring(id), next_id and (" → Q"..tostring(next_id)) or ", puis arrêt")
+    status = string.format(X.T("Devamp armé (Q%s) : fin du cycle région%s."),
+      tostring(id), next_id and (" → Q"..tostring(next_id)) or X.T(", puis arrêt"))
     return true
   end
   return false
@@ -1735,7 +2159,7 @@ function X.process_ext(now)
     if not playing then
       if now - r.t0 > 0.8 then
         reaper.SetMediaTrackInfo_Value(r.master, "D_VOL", r.v0)
-        if not r.seen then status = "La lecture n'a pas démarré dans l'onglet source." end
+        if not r.seen then status = X.T("La lecture n'a pas démarré dans l'onglet source.") end
         ext_runs[id] = nil
       end
     else
@@ -1825,10 +2249,10 @@ function X.fire_cue_inplace(a, lib, reg)
   local pre = ""
   if a.has_snapshot and a.snap then
     local ntr = X.apply_snap(a, a.link_time and fadein or 0, 0)
-    pre = string.format(" + snapshot (%d piste(s))", ntr)
+    pre = string.format(X.T(" + snapshot (%d piste(s))"), ntr)
   end
   local loop_txt = a.loop and " [loop]" or ""
-  status = string.format("REGION \"%s\" : région \"%s\" jouée dans son onglet%s%s", a.name, reg.name, loop_txt, pre)
+  status = string.format(X.T("REGION \"%s\" : région \"%s\" jouée dans son onglet%s%s"), a.name, reg.name, loop_txt, pre)
 end
 
 ---------------------------------------------------------------- CUE
@@ -1916,13 +2340,13 @@ function X.fire_cue(a, from_chain)
 
   if from_file then
     if not a.file or a.file == "" then
-      status = "Cue \""..a.name.."\" : aucun fichier choisi."
+      status = "Cue \""..a.name..X.T("\" : aucun fichier choisi.")
       return
     end
     if not a.track or not X.find_track(a.track) then
       a.track = X.default_track_guid()
       if not a.track then
-        status = "Cue \""..a.name.."\" : le projet ne contient aucune piste. Ajoute une piste puis réessaie."
+        status = "Cue \""..a.name..X.T("\" : le projet ne contient aucune piste. Ajoute une piste puis réessaie.")
         return
       end
       X.save()
@@ -1930,14 +2354,14 @@ function X.fire_cue(a, from_chain)
   else
     lib = X.find_project(a.projfn)
     if not lib then
-      status = "Cue \""..a.name.."\" : projet source non ouvert."
+      status = "Cue \""..a.name..X.T("\" : projet source non ouvert.")
       return
     end
     for _, r in ipairs(X.get_regions(lib)) do
       if r.idx == a.region then reg = r end
     end
     if not reg then
-      status = "Cue \""..a.name.."\" : région introuvable."
+      status = "Cue \""..a.name..X.T("\" : région introuvable.")
       return
     end
     if lib ~= PROJ and not a.copy then
@@ -1948,7 +2372,7 @@ function X.fire_cue(a, from_chain)
 
   local dest = a.track and X.find_track(a.track)
   if a.track and not dest then
-    status = "Cue \""..a.name.."\" : piste introuvable."
+    status = "Cue \""..a.name..X.T("\" : piste introuvable.")
     return
   end
 
@@ -1975,7 +2399,7 @@ function X.fire_cue(a, from_chain)
   local function use_track(tr, nch)
     used[reaper.GetTrackGUID(tr)] = tr
     local n = X.adjust_channels(tr, nch)
-    if n then notes[#notes+1] = X.track_name(tr).." portée à "..n.." canaux" end
+    if n then notes[#notes+1] = X.track_name(tr)..X.T(" portée à ")..n..X.T(" canaux") end
   end
 
   reaper.PreventUIRefresh(1)
@@ -2067,7 +2491,7 @@ function X.fire_cue(a, from_chain)
             d = X.find_track_by_name(tname)
             if not d then
               d = X.create_track(tname)
-              if d then notes[#notes+1] = "piste \""..tname.."\" créée"
+              if d then notes[#notes+1] = X.T("piste \"")..tname..X.T("\" créée")
               else missing = tname end
             end
           end
@@ -2135,9 +2559,9 @@ function X.fire_cue(a, from_chain)
   reaper.UpdateArrange()
 
   if count == 0 then
-    status = missing and ("Cue \""..a.name.."\" : impossible de créer la piste \""..missing.."\".")
-                     or (from_file and ("Cue \""..a.name.."\" : fichier illisible.")
-                       or string.format("Cue \"%s\" : aucun item exploitable.", a.name))
+    status = missing and ("Cue \""..a.name..X.T("\" : impossible de créer la piste \"")..missing.."\".")
+                     or (from_file and ("Cue \""..a.name..X.T("\" : fichier illisible."))
+                       or string.format(X.T("Cue \"%s\" : aucun item exploitable."), a.name))
     return
   end
   if not playing then
@@ -2194,11 +2618,11 @@ function X.fire_cue(a, from_chain)
   local pre = ""
   if a.has_snapshot and a.snap then
     local ntr = X.apply_snap(a, a.link_time and fadein or 0, math.max(0, target - X.now_pos()))
-    pre = string.format(" + snapshot (%d piste(s))", ntr)
+    pre = string.format(X.T(" + snapshot (%d piste(s))"), ntr)
   end
   local kind = from_file and "AUDIO" or "REGION"
   local loop_txt = (not from_file and a.loop) and " [loop]" or ""
-  status = string.format("%s \"%s\" : %d item(s) à %.2f s%s%s%s",
+  status = string.format(X.T("%s \"%s\" : %d item(s) à %.2f s%s%s%s"),
     kind, a.name, count, target, loop_txt, pre,
     #notes > 0 and (" | "..table.concat(notes, ", ")) or "")
 end
@@ -2346,7 +2770,7 @@ function X.stop_all(dur)
     end
     reaper.UpdateArrange()
     X.resync_play_engine()
-    status = "STOP : immédiat (protection anti-clic 3 ms)."
+    status = X.T("STOP : immédiat (protection anti-clic 3 ms).")
     return
   end
 
@@ -2402,14 +2826,14 @@ function X.stop_all(dur)
     }
   end
   if n > 0 then
-    status = string.format("STOP : fondu natif %.1f s (%d item(s))%s",
-      dur, n, prefs.delete_on_stop and " → suppression des items après fondu" or "")
+    status = string.format(X.T("STOP : fondu natif %.1f s (%d item(s))%s"),
+      dur, n, prefs.delete_on_stop and X.T(" → suppression des items après fondu") or "")
   elseif finished_deleted > 0 then
-    status = string.format("STOP : %d item(s) ActionList déjà terminé(s) supprimé(s).", finished_deleted)
+    status = string.format(X.T("STOP : %d item(s) ActionList déjà terminé(s) supprimé(s)."), finished_deleted)
   else
     status = prefs.delete_on_stop
-      and "STOP : rien en cours (nettoyage programmé si items restants)."
-      or "STOP : rien en cours."
+      and X.T("STOP : rien en cours (nettoyage programmé si items restants).")
+      or X.T("STOP : rien en cours.")
   end
   if finished_deleted > 0 or n > 0 then reaper.UpdateArrange() end
 end
@@ -2489,14 +2913,14 @@ function X.stop_targets(ids, dur)
   -- pendant près d'une seconde avant d'appliquer le STOP ciblé.
   X.resync_play_engine()
   status = immediate
-    and string.format("STOP ciblé immédiat (protection 3 ms) : %d item(s)%s", n, prefs.delete_on_stop == true and " → suppression" or " (items conservés)")
-    or string.format("STOP ciblé : fade de %.1f s, %d item(s)%s", dur, n, prefs.delete_on_stop == true and " → suppression" or " (items conservés)")
+    and string.format(X.T("STOP ciblé immédiat (protection 3 ms) : %d item(s)%s"), n, prefs.delete_on_stop == true and X.T(" → suppression") or X.T(" (items conservés)"))
+    or string.format(X.T("STOP ciblé : fade de %.1f s, %d item(s)%s"), dur, n, prefs.delete_on_stop == true and X.T(" → suppression") or X.T(" (items conservés)"))
 end
 
 function X.apply_linked_snapshot(a, dur)
   if a.has_snapshot and a.snap then
     local ntr = X.apply_snap(a, a.link_time and (dur or 0) or 0, 0)
-    status = (status or "") .. string.format(" + snapshot (%d piste(s))", ntr)
+    status = (status or "") .. string.format(X.T(" + snapshot (%d piste(s))"), ntr)
   end
 end
 
@@ -2558,9 +2982,9 @@ function X.fire_pause(a)
       if X.pause_run(id, fade) then n = n + 1 end
     end
   end
-  status = string.format("%s : %d cue(s) concernée(s)%s%s.", a.unpause == true and "UNPAUSE" or "PAUSE", n,
+  status = string.format(X.T("%s : %d cue(s) concernée(s)%s%s."), a.unpause == true and "UNPAUSE" or "PAUSE", n,
     fade > 0 and string.format(", fade %.1f s", fade) or "",
-    skipped_regions > 0 and string.format(" — %d cible(s) REGION ignorée(s) (non prises en charge)", skipped_regions) or "")
+    skipped_regions > 0 and string.format(X.T(" — %d cible(s) REGION ignorée(s) (non prises en charge)"), skipped_regions) or "")
   if a.id then stop_until[a.id] = nil end
   X.apply_linked_snapshot(a, fade)
 end
@@ -2582,7 +3006,7 @@ function X.fire_devamp(a)
     end
   end
   local nxt = any_chain and next_id and (" → Q"..tostring(next_id)) or ""
-  status = string.format("DEVAMP : %d cue(s) armée(s)%s.", n, nxt)
+  status = string.format(X.T("DEVAMP : %d cue(s) armée(s)%s."), n, nxt)
   X.apply_linked_snapshot(a, 0)
 end
 
@@ -2759,7 +3183,7 @@ X.apply_snap = function(a, dur, delay)
   if target_projfn and target_projfn ~= "" then
     lib = X.find_project(target_projfn)
     if not lib then
-      warns[#warns+1] = "projet source du snapshot introuvable (fermé ?)"
+      warns[#warns+1] = X.T("projet source du snapshot introuvable (fermé ?)")
       return 0, warns
     end
   end
@@ -2768,7 +3192,7 @@ X.apply_snap = function(a, dur, delay)
     local tr = X.find_track(g, lib)
     if d and d.include ~= false then
       if not tr then
-        warns[#warns+1] = (d.name or "?").." introuvable"
+        warns[#warns+1] = (d.name or "?")..X.T(" introuvable")
       else
         ntr = ntr + 1
         if use.vol and d.vol then
@@ -2828,7 +3252,7 @@ X.apply_snap = function(a, dur, delay)
                 end
               end
             else
-              warns[#warns+1] = X.track_name(tr).." : effet "..i.." différent"
+              warns[#warns+1] = X.track_name(tr)..X.T(" : effet ")..i..X.T(" différent")
             end
           end
         end
@@ -2853,11 +3277,11 @@ end
 function X.fire_snapshot(a)
   X.ensure_snap(a)
   if not a.snap or #a.snap.order == 0 then
-    status = "SNAPSHOT \""..a.name.."\" : rien de capturé."
+    status = "SNAPSHOT \""..a.name..X.T("\" : rien de capturé.")
     return
   end
   local ntr, warns = X.apply_snap(a, a.dur or 0, 0)
-  status = string.format("SNAPSHOT \"%s\" : %d piste(s)", a.name, ntr)
+  status = string.format(X.T("SNAPSHOT \"%s\" : %d piste(s)"), a.name, ntr)
     .. (#warns > 0 and (" - "..table.concat(warns, ", ")) or "")
 end
 
@@ -2865,16 +3289,16 @@ end
 X.led = {} -- id d'action -> instant du dernier envoi (témoin LED)
 function X.send_osc(port_def, address, args)
   if not has_socket then
-    status = "OSC : Mavriq Lua Sockets 1.2 absent ou non chargeable."
+    status = X.T("OSC : Mavriq Lua Sockets 1.2 absent ou non chargeable.")
     return
   end
   if not port_def or not port_def.ip or not port_def.port then
-    status = "OSC : port invalide."
+    status = X.T("OSC : port invalide.")
     return
   end
   local ok, udp = pcall(socket.udp)
   if not ok or not udp then
-    status = "OSC : impossible de créer le socket UDP."
+    status = X.T("OSC : impossible de créer le socket UDP.")
     return
   end
   udp:settimeout(0)
@@ -2890,7 +3314,7 @@ function X.send_osc(port_def, address, args)
       port_def.name or "?", port_def.ip, port_def.port, address or "/", argstr)
     return true
   else
-    status = "OSC : échec d'envoi ("..tostring(err)..")"
+    status = X.T("OSC : échec d'envoi (")..tostring(err)..")"
     return false
   end
 end
@@ -2901,7 +3325,7 @@ function X.fire_osc(a)
     if p.name == a.port_name then port_def = p break end
   end
   if not port_def then
-    status = "OSC \""..(a.name or "").."\" : port \""..(a.port_name or "").."\" introuvable."
+    status = "OSC \""..(a.name or "")..X.T("\" : port \"")..(a.port_name or "")..X.T("\" introuvable.")
     return
   end
   if X.send_osc(port_def, a.address or "/", a.args) then X.led[a.id] = reaper.time_precise() end
@@ -2970,17 +3394,17 @@ end
 function X.fire_midi(a)
   local tr = a.track and X.find_track(a.track)
   if not tr then
-    status = 'MIDI "'..(a.name or "")..'" : piste cible introuvable.'
+    status = 'MIDI "'..(a.name or "")..X.T('" : piste cible introuvable.')
     return
   end
   if type(reaper.StuffMIDIMessage) ~= "function" then
-    status = "MIDI : StuffMIDIMessage indisponible dans cette version de REAPER."
+    status = X.T("MIDI : StuffMIDIMessage indisponible dans cette version de REAPER.")
     return
   end
 
   local relay = X.ensure_midi_relay_to(tr)
   if not relay then
-    status = 'MIDI "'..(a.name or "")..'" : impossible de créer la piste relais « '..MIDI_RELAY_NAME..' ».'
+    status = 'MIDI "'..(a.name or "")..X.T('" : impossible de créer la piste relais « ')..MIDI_RELAY_NAME..X.T(' ».')
     return
   end
 
@@ -2999,7 +3423,7 @@ function X.fire_midi(a)
         note = note,
       }
     end
-    detail = string.format("note %d vel %d, durée %d ms", note, vel, MIDI_NOTE_DURATION_MS)
+    detail = string.format(X.T("note %d vel %d, durée %d ms"), note, vel, MIDI_NOTE_DURATION_MS)
   elseif typ == "cc" then
     local cc  = math.max(0, math.min(127, a.cc or 1))
     local val = math.max(0, math.min(127, a.value or 0))
@@ -3010,12 +3434,12 @@ function X.fire_midi(a)
     reaper.StuffMIDIMessage(0, 0xC0 + ch, prog, 0)
     detail = string.format("Program %d", prog)
   else
-    status = "MIDI : type inconnu"
+    status = X.T("MIDI : type inconnu")
     return
   end
 
   X.led[a.id] = reaper.time_precise()
-  status = string.format('MIDI "%s" → « %s » via relais « %s » (%s, canal %d)',
+  status = string.format(X.T('MIDI "%s" → « %s » via relais « %s » (%s, canal %d)'),
     a.name or "", X.track_name(tr), MIDI_RELAY_NAME, detail, ch + 1)
 end
 
@@ -3068,7 +3492,7 @@ function X.fire_qids_once(project_key, guid, abspos, qids)
       if act then
         X.fire(act)
       else
-        status = string.format("Marqueur Q%s détecté, mais aucun cue avec l'ID %s n'existe dans cette ActionList.", tostring(qid), tostring(qid))
+        status = string.format(X.T("Marqueur Q%s détecté, mais aucun cue avec l'ID %s n'existe dans cette ActionList."), tostring(qid), tostring(qid))
       end
     end
   end
@@ -3145,7 +3569,7 @@ function X.process_jobs()
   if play_check and now >= play_check then
     play_check = nil
     if not X.is_playing() then
-      status = "Attention : la lecture n'a pas démarré."
+      status = X.T("Attention : la lecture n'a pas démarré.")
     end
   end
   X.process_runs(now)
@@ -3175,7 +3599,7 @@ function X.process_jobs()
             if prefs.delete_on_stop == true then X.delete_all_cuelist_items() end
             X.stop_here() -- revient au point de départ de la session
             cue_session, idle_since = false, nil
-            status = "Lecture arrêtée : plus aucun média."
+            status = X.T("Lecture arrêtée : plus aucun média.")
           end
         end
       end
@@ -3199,7 +3623,7 @@ function X.process_jobs()
       reaper.SetEditCurPos2(PROJ, pos, true, false)
       cue_session = false
       if n > 0 then
-        status = string.format("Nettoyage : %d item(s) supprimé(s).", n)
+        status = string.format(X.T("Nettoyage : %d item(s) supprimé(s)."), n)
       end
     end
   end
@@ -3338,11 +3762,11 @@ function X.global_pause_all()
     end
   end
   if not gp.main and #gp.exts == 0 then
-    status = "Pause : aucun média en cours."
+    status = X.T("Pause : aucun média en cours.")
     return
   end
   X.global_pause = gp
-  status = "PAUSE : timeline arrêtée (tu peux revenir en arrière, puis relancer)."
+  status = X.T("PAUSE : timeline arrêtée (tu peux revenir en arrière, puis relancer).")
 end
 
 -- Décale les minuteurs en temps réel de la durée de la pause.
@@ -3377,7 +3801,7 @@ function X.global_resume()
       X.with_proj(r.proj, function() reaper.OnPauseButton() end)
     end
   end
-  status = "REPRISE."
+  status = X.T("REPRISE.")
 end
 
 function X.global_pause_toggle()
@@ -3481,7 +3905,7 @@ function X.preset_autoname(p)
   end
   if p.stretch then t[#t + 1] = "T" end
   if p.reverse then t[#t + 1] = "R" end
-  return #t > 0 and table.concat(t, " ") or "Défaut"
+  return #t > 0 and table.concat(t, " ") or X.T("Défaut")
 end
 
 -- Plus petit numéro de preset libre (un numéro supprimé est réattribué).
@@ -3507,7 +3931,7 @@ function X.ensure_presets(a)
   if not (a and a.type == "audio") then return end
   if type(a.presets) ~= "table" or #a.presets == 0 then
     local p = X.preset_vals_from_cue(a)
-    p.id, p.name = 0, "Défaut"
+    p.id, p.name = 0, X.T("Défaut")
     a.presets = {p}
     a.preset_next = 1
     a.preset_edit, a.preset_recall = 0, 0
@@ -3519,7 +3943,7 @@ function X.ensure_presets(a)
     p.name = tostring(p.name or "")
     if p.custom == nil then
       -- Anciens presets : un nom saisi à la main est conservé, les noms par défaut deviennent automatiques.
-      p.custom = not (p.name == "" or p.name == "Défaut" or p.name:match("^Preset %d+$") ~= nil)
+      p.custom = not (p.name == "" or (p.name == "Défaut" or p.name == "Default") or p.name:match("^Preset %d+$") ~= nil)
     end
     if not p.custom then p.name = X.preset_autoname(p) end
     if p.id > maxid then maxid = p.id end
@@ -3707,10 +4131,10 @@ function X.fire_preset(a)
       end
     end
   end
-  status = string.format("PRESET %d : %d cue(s) concernée(s)%s%s%s.", pid, n,
+  status = string.format(X.T("PRESET %d : %d cue(s) concernée(s)%s%s%s."), pid, n,
     dur > 0 and string.format(", transition %.1f s", dur) or "",
-    idle > 0 and string.format(" — %d cue(s) non jouée(s) ignorée(s)", idle) or "",
-    #missing > 0 and (" — preset introuvable pour " .. table.concat(missing, ", ")) or "")
+    idle > 0 and string.format(X.T(" — %d cue(s) non jouée(s) ignorée(s)"), idle) or "",
+    #missing > 0 and (X.T(" — preset introuvable pour ") .. table.concat(missing, ", ")) or "")
 end
 
 ---------------------------------------------------------------- Fire
@@ -3846,7 +4270,7 @@ function X.process_auto_chain()
   local chain_mode = chain.mode
   auto_chain = nil
   if next_id == nil or next_id == source_id then
-    status = (chain_mode == "follow" and "FOLLOW" or "AUTO") .. " : pas de cue suivante."
+    status = (chain_mode == "follow" and "FOLLOW" or "AUTO") .. X.T(" : pas de cue suivante.")
     return
   end
   -- FOLLOW : la source est terminée → on la coupe pour éviter qu'elle continue / se relance.
@@ -3879,7 +4303,7 @@ function X.process_auto_chain()
     end
   end
   status = (chain_mode == "follow" and "FOLLOW" or "AUTO")
-    .. " : cue suivante introuvable (ID " .. tostring(next_id) .. ")."
+    .. X.T(" : cue suivante introuvable (ID ") .. tostring(next_id) .. ")."
 end
 
 ---------------------------------------------------------------- Interface utilitaires
@@ -3930,7 +4354,7 @@ function X.delete_picked()
     picked = {[nxt.id] = true}; selected = nxt.id; pick_anchor = math.min(first_i or 1, #actions)
   end
   X.save()
-  status = n .. " action(s) supprimée(s) (Ctrl/Cmd+Suppr)."
+  status = n .. X.T(" action(s) supprimée(s) (Ctrl/Cmd+Suppr).")
   return true
 end
 
@@ -3960,7 +4384,7 @@ end
 function X.copy_picked_actions(cut)
   local items = X.collect_picked_actions()
   if #items == 0 then
-    status = "Sélectionne une ou plusieurs cues par leur titre avant Ctrl/Cmd+C ou X."
+    status = X.T("Sélectionne une ou plusieurs cues par leur titre avant Ctrl/Cmd+C ou X.")
     return
   end
   cue_clipboard = items
@@ -3979,15 +4403,15 @@ function X.copy_picked_actions(cut)
     picked, pick_anchor = {}, nil
     if selected and ids[selected] then selected = nil end
     X.save()
-    status = tostring(#items) .. " cue(s) coupée(s). Colle avec Ctrl/Cmd+V."
+    status = tostring(#items) .. X.T(" cue(s) coupée(s). Colle avec Ctrl/Cmd+V.")
   else
-    status = tostring(#items) .. " cue(s) copiée(s). Colle avec Ctrl/Cmd+V."
+    status = tostring(#items) .. X.T(" cue(s) copiée(s). Colle avec Ctrl/Cmd+V.")
   end
 end
 
 function X.paste_picked_actions()
   if type(cue_clipboard) ~= "table" or #cue_clipboard == 0 then
-    status = "Le presse-papiers des cues est vide."
+    status = X.T("Le presse-papiers des cues est vide.")
     return
   end
   local pasted_ids = {}
@@ -4007,7 +4431,7 @@ function X.paste_picked_actions()
     cue_clipboard, clipboard_cut = nil, false
   end
   X.save()
-  status = tostring((function() local n=0; for _ in pairs(pasted_ids) do n=n+1 end; return n end)()) .. " cue(s) collée(s) dans « " .. tostring(tabs[active_tab].name or "liste active") .. " »."
+  status = tostring((function() local n=0; for _ in pairs(pasted_ids) do n=n+1 end; return n end)()) .. X.T(" cue(s) collée(s) dans « ") .. tostring(X.dn(tabs[active_tab].name or X.T("liste active"))) .. X.T(" ».")
 end
 
 function X.move_rows(from, to)
@@ -4057,7 +4481,7 @@ end
 function X.go_selected()
   local si
   for i, a in ipairs(actions) do if a.id == selected then si = i end end
-  if not si then status = "Aucune action sélectionnée." return end
+  if not si then status = X.T("Aucune action sélectionnée.") return end
   X.fire(actions[si])
   if actions[si+1] then
     X.pick_only(actions[si+1], si+1)
@@ -4107,16 +4531,16 @@ end
 
 function X.track_combo(label, guid, allow_none)
   local tr = X.find_track(guid)
-  local preview = tr and X.track_name(tr) or (allow_none and "(piste d'origine)" or "(choisir)")
+  local preview = tr and X.track_name(tr) or (allow_none and X.T("(piste d'origine)") or X.T("(choisir)"))
   local changed, new = false, guid
   if reaper.ImGui_BeginCombo(ctx, label, preview) then
-    if allow_none and reaper.ImGui_Selectable(ctx, "(piste d'origine)##none", guid == nil) then
+    if allow_none and reaper.ImGui_Selectable(ctx, X.T("(piste d'origine)##none"), guid == nil) then
       new, changed = nil, true
     end
     for i = 0, reaper.CountTracks(PROJ)-1 do
       local t = reaper.GetTrack(PROJ, i)
       local g = reaper.GetTrackGUID(t)
-      local folder = reaper.GetMediaTrackInfo_Value(t, "I_FOLDERDEPTH") == 1 and " [dossier]" or ""
+      local folder = reaper.GetMediaTrackInfo_Value(t, "I_FOLDERDEPTH") == 1 and X.T(" [dossier]") or ""
       if reaper.ImGui_Selectable(ctx, (i+1)..". "..X.track_name(t)..folder.."##"..g, g == guid) then
         new, changed = g, true
       end
@@ -4172,37 +4596,37 @@ function X.draw_snap_editor(a, lib)
   a.use = a.use or {vol=true, pan=true, mute=true, solo=true, arm=true, fxen=true, fxpar=true, send=true}
   if a.use.send == nil then a.use.send = true end
   if lib ~= PROJ then
-    local label = "projet cible"
+    local label = X.T("projet cible")
     local src_fn = (a.type == "snapshot") and a.projfn or a.snap_projfn
     if src_fn and src_fn ~= "" then
       label = src_fn:match("([^/\\]+)$") or src_fn
     end
-    reaper.ImGui_TextDisabled(ctx, "Pistes ciblées dans : " .. label)
+    reaper.ImGui_TextDisabled(ctx, X.T("Pistes ciblées dans : ") .. label)
   end
-  if reaper.ImGui_Button(ctx, "Capturer les pistes sélectionnées") then
+  if reaper.ImGui_Button(ctx, X.T("Capturer les pistes sélectionnées")) then
     local n = reaper.CountSelectedTracks(lib)
     if n == 0 then
-      status = "Sélectionne d'abord une ou plusieurs pistes dans REAPER (projet cible)."
+      status = X.T("Sélectionne d'abord une ou plusieurs pistes dans REAPER (projet cible).")
     else
       local snap = {order={}, tracks={}}
       for k = 0, n-1 do X.snap_add(snap, reaper.GetSelectedTrack(lib, k)) end
       a.snap = snap
       X.save()
-      status = n.." piste(s) capturée(s)."
+      status = n..X.T(" piste(s) capturée(s).")
     end
   end
   reaper.ImGui_SameLine(ctx)
-  if reaper.ImGui_Button(ctx, "Capturer toutes les pistes") then
+  if reaper.ImGui_Button(ctx, X.T("Capturer toutes les pistes")) then
     local snap = {order={}, tracks={}}
     for k = 0, reaper.CountTracks(lib)-1 do X.snap_add(snap, reaper.GetTrack(lib, k)) end
     a.snap = snap
     X.save()
-    status = #snap.order.." piste(s) capturée(s)."
+    status = #snap.order..X.T(" piste(s) capturée(s).")
   end
   if not a.snap or #a.snap.order == 0 then
-    reaper.ImGui_TextDisabled(ctx, "Rien de capturé. Sélectionne des pistes, règle-les, puis clique sur Capturer.")
+    reaper.ImGui_TextDisabled(ctx, X.T("Rien de capturé. Sélectionne des pistes, règle-les, puis clique sur Capturer."))
   else
-    reaper.ImGui_Text(ctx, string.format("Capturé : %d piste(s). Décoche celles à ignorer :", #a.snap.order))
+    reaper.ImGui_Text(ctx, string.format(X.T("Capturé : %d piste(s). Décoche celles à ignorer :"), #a.snap.order))
     for _, g in ipairs(a.snap.order) do
       local st = a.snap.tracks[g]
       local x
@@ -4210,7 +4634,7 @@ function X.draw_snap_editor(a, lib)
       if x then X.save() end
     end
     reaper.ImGui_Spacing(ctx)
-    reaper.ImGui_Text(ctx, "Ce que le snapshot rappelle :")
+    reaper.ImGui_Text(ctx, X.T("Ce que le snapshot rappelle :"))
     local u = a.use
     local x
     x, u.vol   = reaper.ImGui_Checkbox(ctx, "Volume", u.vol)   ; if x then X.save() end
@@ -4221,15 +4645,15 @@ function X.draw_snap_editor(a, lib)
     reaper.ImGui_SameLine(ctx)
     x, u.solo  = reaper.ImGui_Checkbox(ctx, "Solo", u.solo)   ; if x then X.save() end
     reaper.ImGui_SameLine(ctx)
-    x, u.arm   = reaper.ImGui_Checkbox(ctx, "Armer", u.arm)   ; if x then X.save() end
+    x, u.arm   = reaper.ImGui_Checkbox(ctx, X.T("Armer"), u.arm)   ; if x then X.save() end
     reaper.ImGui_SameLine(ctx)
-    x, u.fxen  = reaper.ImGui_Checkbox(ctx, "FX actif/bypass", u.fxen) ; if x then X.save() end
+    x, u.fxen  = reaper.ImGui_Checkbox(ctx, X.T("FX actif/bypass"), u.fxen) ; if x then X.save() end
     reaper.ImGui_SameLine(ctx)
-    x, u.fxpar = reaper.ImGui_Checkbox(ctx, "Paramètres FX", u.fxpar) ; if x then X.save() end
+    x, u.fxpar = reaper.ImGui_Checkbox(ctx, X.T("Paramètres FX"), u.fxpar) ; if x then X.save() end
     reaper.ImGui_SameLine(ctx)
     if u.send == nil then u.send = true end
     x, u.send  = reaper.ImGui_Checkbox(ctx, "Sends", u.send) ; if x then X.save() end
-    if reaper.ImGui_TreeNode(ctx, "Détail des effets##fxdetail") then
+    if reaper.ImGui_TreeNode(ctx, X.T("Détail des effets##fxdetail")) then
       for _, g in ipairs(a.snap.order) do
         local st = a.snap.tracks[g]
         if #(st.fx or {}) > 0 then
@@ -4237,7 +4661,7 @@ function X.draw_snap_editor(a, lib)
           for k, f in ipairs(st.fx) do
             local y
             y, f.use = reaper.ImGui_Checkbox(ctx,
-              k..". "..f.name..(f.enabled and " (actif)" or " (bypass)").."##fx"..g..k, f.use)
+              k..". "..f.name..(f.enabled and X.T(" (actif)") or " (bypass)").."##fx"..g..k, f.use)
             if y then X.save() end
           end
         end
@@ -4254,17 +4678,17 @@ X.C_LEFT, X.C_RIGHT = reaper.ImGui_MouseButton_Left(), reaper.ImGui_MouseButton_
 -- Construit réellement les peaks REAPER : l'API fonctionne en trois phases
 -- (Begin, Run jusqu'à 0, Finish). Détruire la source juste après Begin ne suffit pas.
 function X.build_peaks_file(file)
-  if not file or file == "" then return false, "Aucun fichier audio." end
+  if not file or file == "" then return false, X.T("Aucun fichier audio.") end
   if not reaper.PCM_Source_BuildPeaks then
-    return false, "PCM_Source_BuildPeaks n'est pas disponible dans cette version de REAPER."
+    return false, X.T("PCM_Source_BuildPeaks n'est pas disponible dans cette version de REAPER.")
   end
   local src = reaper.PCM_Source_CreateFromFile(file)
-  if not src then return false, "REAPER ne peut pas ouvrir la source audio : " .. tostring(file) end
+  if not src then return false, X.T("REAPER ne peut pas ouvrir la source audio : ") .. tostring(file) end
 
   local ok, remaining = pcall(reaper.PCM_Source_BuildPeaks, src, 0)
   if not ok then
     reaper.PCM_Source_Destroy(src)
-    return false, "Échec au démarrage de la génération des peaks."
+    return false, X.T("Échec au démarrage de la génération des peaks.")
   end
 
   if type(remaining) == "number" and remaining > 0 then
@@ -4273,19 +4697,19 @@ function X.build_peaks_file(file)
       local run_ok, next_remaining = pcall(reaper.PCM_Source_BuildPeaks, src, 1)
       if not run_ok or type(next_remaining) ~= "number" then
         reaper.PCM_Source_Destroy(src)
-        return false, "Échec pendant la génération des peaks."
+        return false, X.T("Échec pendant la génération des peaks.")
       end
       remaining = next_remaining
       iterations = iterations + 1
     end
     if remaining > 0 then
       reaper.PCM_Source_Destroy(src)
-      return false, "La génération des peaks n'a pas terminé dans le délai prévu."
+      return false, X.T("La génération des peaks n'a pas terminé dans le délai prévu.")
     end
     local finish_ok = pcall(reaper.PCM_Source_BuildPeaks, src, 2)
     if not finish_ok then
       reaper.PCM_Source_Destroy(src)
-      return false, "Échec de finalisation du fichier peaks."
+      return false, X.T("Échec de finalisation du fichier peaks.")
     end
   end
   reaper.PCM_Source_Destroy(src)
@@ -4300,7 +4724,7 @@ end
 -- Régénération forcée : supprime le fichier .reapeaks existant (peut être corrompu ou périmé,
 -- surtout avec FLAC / MP3) puis demande à REAPER de le reconstruire entièrement.
 function X.regenerate_wave(file)
-  if not file or file == "" then status = "Aucun fichier audio."; return end
+  if not file or file == "" then status = X.T("Aucun fichier audio."); return end
   local pk = file .. ".reapeaks"
   local removed, had = false, false
   if reaper.file_exists(pk) then
@@ -4312,13 +4736,13 @@ function X.regenerate_wave(file)
   wave_cache[file] = nil
   reaper.UpdateArrange()
   if not ok then
-    status = msg or "REAPER n'a pas pu reconstruire les peaks."
+    status = msg or X.T("REAPER n'a pas pu reconstruire les peaks.")
   elseif had and not removed then
-    status = "Peaks reconstruits, mais l'ancien .reapeaks n'a pas pu être supprimé (fichier verrouillé ?)."
+    status = X.T("Peaks reconstruits, mais l'ancien .reapeaks n'a pas pu être supprimé (fichier verrouillé ?).")
   elseif not had then
-    status = "Peaks reconstruits. Aucun .reapeaks à côté du fichier (cache de peaks alternatif ?) : l'ancien cache n'a pas pu être supprimé."
+    status = X.T("Peaks reconstruits. Aucun .reapeaks à côté du fichier (cache de peaks alternatif ?) : l'ancien cache n'a pas pu être supprimé.")
   else
-    status = "Forme d'onde régénérée : " .. tostring(file)
+    status = X.T("Forme d'onde régénérée : ") .. tostring(file)
   end
 end
 
@@ -4344,11 +4768,11 @@ function X.get_wave(file)
   w.retry_at = reaper.time_precise() + 1.5
   wave_cache[file] = w
   local src = reaper.PCM_Source_CreateFromFile(file)
-  if not src then w.err = "Fichier illisible." return w end
+  if not src then w.err = X.T("Fichier illisible.") return w end
   local len = reaper.GetMediaSourceLength(src)
   if not len or len <= 0 then
     reaper.PCM_Source_Destroy(src)
-    w.err = "Durée inconnue (sous-projet ?) : pas de forme d'onde."
+    w.err = X.T("Durée inconnue (sous-projet ?) : pas de forme d'onde.")
     return w
   end
   w.len = len
@@ -4369,7 +4793,7 @@ function X.get_wave(file)
     cnt = math.floor(ret) & 0xFFFFF
   end
   reaper.PCM_Source_Destroy(src)
-  if cnt <= 0 then w.err = "Forme d'onde indisponible : REAPER n'a pas fourni de peaks après tentative de reconstruction." return w end
+  if cnt <= 0 then w.err = X.T("Forme d'onde indisponible : REAPER n'a pas fourni de peaks après tentative de reconstruction.") return w end
   w.max, w.min, w.n = {}, {}, cnt
   for sidx = 1, cnt do
     local mx, mn = -1, 1
@@ -4532,7 +4956,7 @@ function X.assign_audio_file(a, f)
   -- demande leur reconstruction au moteur REAPER au lieu d'attendre un geste manuel.
   local initial_wave = X.get_wave(f)
   if initial_wave and initial_wave.err then
-    status = "Fichier chargé, mais waveform indisponible : " .. tostring(initial_wave.err)
+    status = X.T("Fichier chargé, mais waveform indisponible : ") .. tostring(initial_wave.err)
   end
   X.save()
 end
@@ -4572,14 +4996,14 @@ end
 
 function X.copy_file(src, dst)
   local input = io.open(src, "rb")
-  if not input then return false, "Lecture impossible : " .. tostring(src) end
+  if not input then return false, X.T("Lecture impossible : ") .. tostring(src) end
   local output = io.open(dst, "wb")
-  if not output then input:close(); return false, "Écriture impossible : " .. tostring(dst) end
+  if not output then input:close(); return false, X.T("Écriture impossible : ") .. tostring(dst) end
   while true do
     local chunk = input:read(1024 * 1024)
     if not chunk then break end
     local ok, err = output:write(chunk)
-    if not ok then input:close(); output:close(); return false, err or "Écriture interrompue." end
+    if not ok then input:close(); output:close(); return false, err or X.T("Écriture interrompue.") end
   end
   input:close(); output:close()
   return true
@@ -4627,7 +5051,7 @@ function X.resolve_loaded_media_paths(actionlist_path)
   local root = nil
   if reaper.JS_Dialog_BrowseForFolder then
     local ok, folder = reaper.JS_Dialog_BrowseForFolder(
-      string.format("%d fichier(s) audio manquant(s) — choisir le dossier de recherche", #missing), base)
+      string.format(X.T("%d fichier(s) audio manquant(s) — choisir le dossier de recherche"), #missing), base)
     if ok and folder and folder ~= "" then root = folder end
   end
   local repaired, ambiguous = 0, 0
@@ -4639,7 +5063,7 @@ function X.resolve_loaded_media_paths(actionlist_path)
       elseif #found > 1 then
         ambiguous = ambiguous + 1
         if reaper.GetUserFileNameForRead then
-          local ok, chosen = reaper.GetUserFileNameForRead(found[1], "Plusieurs fichiers nommés " .. X.path_base(a.file) .. " — choisir le bon", "")
+          local ok, chosen = reaper.GetUserFileNameForRead(found[1], X.T("Plusieurs fichiers nommés ") .. X.path_base(a.file) .. X.T(" — choisir le bon"), "")
           if ok and chosen and chosen ~= "" and X.file_exists(chosen) then
             a.file = chosen; wave_cache[a.file] = nil; repaired = repaired + 1
           end
@@ -4650,36 +5074,36 @@ function X.resolve_loaded_media_paths(actionlist_path)
   local still_missing = 0
   for _, a in ipairs(missing) do if not X.file_exists(a.file) then still_missing = still_missing + 1 end end
   if still_missing > 0 then
-    status = string.format("ActionList ouverte : %d média(s) manquant(s), %d réparé(s). Utilise Open après avoir regroupé les médias pour relancer la recherche.", still_missing, repaired)
+    status = string.format(X.T("ActionList ouverte : %d média(s) manquant(s), %d réparé(s). Utilise Open après avoir regroupé les médias pour relancer la recherche."), still_missing, repaired)
   else
-    status = string.format("ActionList ouverte : tous les médias retrouvés (%d chemin(s) corrigé(s)).", repaired)
+    status = string.format(X.T("ActionList ouverte : tous les médias retrouvés (%d chemin(s) corrigé(s))."), repaired)
   end
   return still_missing
 end
 
 function X.save_bundle(folder, lua_filename)
-  if not folder or folder == "" then return false, "Dossier Bundle non sélectionné." end
-  if not reaper.RecursiveCreateDirectory then return false, "Cette version de REAPER ne permet pas de créer le dossier Bundle." end
+  if not folder or folder == "" then return false, X.T("Dossier Bundle non sélectionné.") end
+  if not reaper.RecursiveCreateDirectory then return false, X.T("Cette version de REAPER ne permet pas de créer le dossier Bundle.") end
   local root = folder:gsub("[\\/]+$", "")
   reaper.RecursiveCreateDirectory(root, 0)
   local audio_dir = X.path_join(root, "audiofiles")
   reaper.RecursiveCreateDirectory(audio_dir, 0)
   local test_path = X.path_join(root, ".realive_bundle_write_test.tmp")
   local test = io.open(test_path, "wb")
-  if not test then return false, "Impossible d'écrire dans le dossier Bundle." end
+  if not test then return false, X.T("Impossible d'écrire dans le dossier Bundle.") end
   test:close(); os.remove(test_path)
 
   local data = {actions = actions, tabs = tabs, active_tab = active_tab, next_id = next_id, prefs = prefs}
   local loader = load("return " .. X.ser(data), "bundle_copy", "t", {})
-  if not loader then return false, "Impossible de préparer une copie de l'ActionList." end
+  if not loader then return false, X.T("Impossible de préparer une copie de l'ActionList.") end
   local ok_clone, clone = pcall(loader)
-  if not ok_clone or type(clone) ~= "table" then return false, "Impossible de préparer une copie de l'ActionList." end
+  if not ok_clone or type(clone) ~= "table" then return false, X.T("Impossible de préparer une copie de l'ActionList.") end
   local copied, peaks_copied, peaks_missing, path_map, used_names = 0, 0, 0, {}, {}
   local function copy_action_list(list)
     for _, a in ipairs(list or {}) do
       if type(a.file) == "string" and a.file ~= "" then
         local original = a.file
-        if not X.file_exists(original) then return false, "Média introuvable : " .. original end
+        if not X.file_exists(original) then return false, X.T("Média introuvable : ") .. original end
         local rel = path_map[original]
         if not rel then
           local name = X.path_base(original)
@@ -4735,11 +5159,11 @@ function X.save_bundle(folder, lua_filename)
   if not output_name:lower():match("%.lua$") then output_name = output_name .. ".lua" end
   local output_path = X.path_join(root, output_name)
   local out = io.open(output_path, "w")
-  if not out then return false, "Impossible d'enregistrer " .. output_name .. " dans le Bundle." end
+  if not out then return false, X.T("Impossible d'enregistrer ") .. output_name .. X.T(" dans le Bundle.") end
   out:write(X.ser(clone)); out:close()
-  local summary = string.format("Bundle créé : %s (fichier %s, %d fichier(s) audio copié(s), %d fichier(s) .reapeaks copié(s)).", root, output_name, copied, peaks_copied)
+  local summary = string.format(X.T("Bundle créé : %s (fichier %s, %d fichier(s) audio copié(s), %d fichier(s) .reapeaks copié(s))."), root, output_name, copied, peaks_copied)
   if peaks_missing > 0 then
-    summary = summary .. string.format(" Attention : %d fichier(s) .reapeaks absent(s) ou non copié(s) ; REAPER devra les régénérer.", peaks_missing)
+    summary = summary .. string.format(X.T(" Attention : %d fichier(s) .reapeaks absent(s) ou non copié(s) ; REAPER devra les régénérer."), peaks_missing)
   end
   return true, summary
 end
@@ -4768,9 +5192,9 @@ function X.accept_audio_file_drop(a)
     end
     if chosen then
       X.assign_audio_file(a, chosen)
-      status = "Fichier audio chargé par glisser-déposer."
+      status = X.T("Fichier audio chargé par glisser-déposer.")
     elseif unsupported then
-      status = "Format non reconnu : dépose un fichier audio ou vidéo compatible avec REAPER."
+      status = X.T("Format non reconnu : dépose un fichier audio ou vidéo compatible avec REAPER.")
     end
   end
   reaper.ImGui_EndDragDropTarget(ctx)
@@ -4783,7 +5207,7 @@ function X.accept_audio_file_drop_create(insert_index)
   if not reaper.ImGui_BeginDragDropTarget or not reaper.ImGui_AcceptDragDropPayloadFiles
       or not reaper.ImGui_GetDragDropPayloadFile or not reaper.ImGui_EndDragDropTarget then
     if not file_drop_api_warning_shown then
-      status = "Glisser-déposer de fichiers indisponible : mets ReaImGui à jour via ReaPack."
+      status = X.T("Glisser-déposer de fichiers indisponible : mets ReaImGui à jour via ReaPack.")
       file_drop_api_warning_shown = true
     end
     return false
@@ -4792,14 +5216,14 @@ function X.accept_audio_file_drop_create(insert_index)
     -- Diagnostic visible : les fonctions existent, mais cet item n'est pas reconnu
     -- comme cible active par ReaImGui au moment de l'appel.
     if reaper.ImGui_IsItemHovered and reaper.ImGui_IsItemHovered(ctx) then
-      status = "Diagnostic dépôt : titre survolé, mais la cible ImGui n'est pas activée."
+      status = X.T("Diagnostic dépôt : titre survolé, mais la cible ImGui n'est pas activée.")
     end
     return false
   end
-  status = "Diagnostic dépôt : cible titre active, attente du fichier…"
+  status = X.T("Diagnostic dépôt : cible titre active, attente du fichier…")
   local flags = (reaper.ImGui_DragDropFlags_None and reaper.ImGui_DragDropFlags_None() or 0)
   local ok, count = reaper.ImGui_AcceptDragDropPayloadFiles(ctx, nil, flags)
-  if ok then status = "Diagnostic dépôt : payload accepté, nombre de fichiers = " .. tostring(count or 0) end
+  if ok then status = X.T("Diagnostic dépôt : payload accepté, nombre de fichiers = ") .. tostring(count or 0) end
   local created = false
   if ok and count and count > 0 then
     -- Plusieurs fichiers déposés d'un coup : une cue par fichier compatible,
@@ -4835,20 +5259,32 @@ function X.accept_audio_file_drop_create(insert_index)
       pick_anchor = first_pos
       selected = new_ids[1]
       X.save()
-      local extra = rejected > 0 and (" (" .. rejected .. " fichier(s) ignoré(s) : format non reconnu)") or ""
+      local extra = rejected > 0 and (" (" .. rejected .. X.T(" fichier(s) ignoré(s) : format non reconnu)")) or ""
       if #files == 1 then
-        status = guid and ("Cue fichier créée : " .. actions[first_pos].name .. " (première piste du projet)." .. extra)
-          or ("Cue créée : " .. actions[first_pos].name .. ", mais le projet ne contient aucune piste.")
+        status = guid and (X.T("Cue fichier créée : ") .. actions[first_pos].name .. X.T(" (première piste du projet).") .. extra)
+          or (X.T("Cue créée : ") .. actions[first_pos].name .. X.T(", mais le projet ne contient aucune piste."))
       else
-        status = #files .. " cues créées" .. (guid and " (première piste du projet)" or " (le projet ne contient aucune piste)") .. "." .. extra
+        status = #files .. X.T(" cues créées") .. (guid and X.T(" (première piste du projet)") or X.T(" (le projet ne contient aucune piste)")) .. "." .. extra
       end
       created = true
     else
-      status = "Format non reconnu : dépose un fichier audio ou vidéo compatible avec REAPER."
+      status = X.T("Format non reconnu : dépose un fichier audio ou vidéo compatible avec REAPER.")
     end
   end
   reaper.ImGui_EndDragDropTarget(ctx)
   return created
+end
+
+-- Position de la première source réelle (WAVE, FLAC, MP3, VORBIS, VIDEO...) : tout bloc
+-- « <SOURCE xxx » sauf le wrapper SECTION lui-même.
+function X.find_inner_source(chunk, from)
+  local pos = from
+  while true do
+    local s, e, kind = chunk:find("<SOURCE%s+(%w+)", pos)
+    if not s then return nil end
+    if kind ~= "SECTION" then return s end
+    pos = e + 1
+  end
 end
 
 -- Active/désactive le reverse natif REAPER en enveloppant la source dans SOURCE SECTION.
@@ -4861,11 +5297,8 @@ function X.set_item_reverse(item, reverse)
   local source_start = chunk:find("<SOURCE SECTION", 1, true)
   if source_start then
     -- Déjà en SECTION : on conserve la source imbriquée et ne change que MODE.
-    local inner_start = chunk:find("<SOURCE WAVE", source_start, true)
-    if not inner_start then
-      -- Sources autres que WAVE : ne pas toucher à une structure inconnue.
-      return false
-    end
+    local inner_start = X.find_inner_source(chunk, source_start + 1)
+    if not inner_start then return false end
     local inner_end = chunk:find("\n>", inner_start, true)
     if not inner_end then return false end
     local section_end = chunk:find("\n>", inner_end + 2, true)
@@ -4881,7 +5314,7 @@ function X.set_item_reverse(item, reverse)
       chunk = chunk:sub(1, source_start - 1) .. inner .. chunk:sub(section_end + 2)
     end
   elseif reverse then
-    local wave_start = chunk:find("<SOURCE WAVE", 1, true)
+    local wave_start = X.find_inner_source(chunk, 1)
     if not wave_start then return false end
     local wave_end = chunk:find("\n>", wave_start, true)
     if not wave_end then return false end
@@ -5004,7 +5437,7 @@ function X.draw_play_settings(a)
   X.ensure_presets(a)
   local p = X.preset_by_id(a, a.preset_edit)
   reaper.ImGui_Separator(ctx)
-  if reaper.ImGui_CollapsingHeader(ctx, "Réglages de lecture (gain, pan, vitesse, pitch, reverse, tempo)##playset", nil,
+  if reaper.ImGui_CollapsingHeader(ctx, X.T("Réglages de lecture (gain, pan, vitesse, pitch, reverse, tempo)##playset"), nil,
       reaper.ImGui_TreeNodeFlags_DefaultOpen()) then
     -- Les curseurs éditent le preset sélectionné dans la boîte de droite.
     local function commit()
@@ -5022,27 +5455,27 @@ function X.draw_play_settings(a)
     local cp, pan = reaper.ImGui_SliderDouble(ctx, "Pan##wave_pan", p.pan, -1, 1, "%.2f")
     if cp then p.pan = pan; commit() end
     reaper.ImGui_SetNextItemWidth(ctx, X.S(130))
-    local cs, speed = reaper.ImGui_InputDouble(ctx, "Vitesse##wave_speed", p.speed, 0.1, 0.5, "%.3f")
+    local cs, speed = reaper.ImGui_InputDouble(ctx, X.T("Vitesse##wave_speed"), p.speed, 0.1, 0.5, "%.3f")
     if cs then p.speed = speed; commit() end
     reaper.ImGui_SameLine(ctx)
-    local cst, stretch = reaper.ImGui_Checkbox(ctx, "Stretch au tempo##wave_stretch_tempo", p.stretch)
+    local cst, stretch = reaper.ImGui_Checkbox(ctx, X.T("Stretch au tempo##wave_stretch_tempo"), p.stretch)
     if cst then p.stretch = stretch; commit() end
 
     if not p.pitch_link then
       reaper.ImGui_SetNextItemWidth(ctx, X.S(130))
-      local cpi, pitch = reaper.ImGui_InputDouble(ctx, "Pitch (demi-tons)##wave_pitch", p.pitch, 1, 4, "%.2f")
+      local cpi, pitch = reaper.ImGui_InputDouble(ctx, X.T("Pitch (demi-tons)##wave_pitch"), p.pitch, 1, 4, "%.2f")
       if cpi then p.pitch = pitch; commit() end
     else
-      reaper.ImGui_Text(ctx, "Pitch lié à la vitesse")
+      reaper.ImGui_Text(ctx, X.T("Pitch lié à la vitesse"))
       reaper.ImGui_SameLine(ctx)
       local linked_pitch = 12 * (math.log(math.max(0.01, p.speed)) / math.log(2))
-      reaper.ImGui_TextDisabled(ctx, string.format("%+.2f demi-tons", linked_pitch))
+      reaper.ImGui_TextDisabled(ctx, string.format(X.T("%+.2f demi-tons"), linked_pitch))
     end
     reaper.ImGui_SameLine(ctx)
     local cr, reverse = reaper.ImGui_Checkbox(ctx, "Reverse##wave_reverse", p.reverse)
     if cr then p.reverse = reverse; commit() end
 
-    local cl, linked = reaper.ImGui_Checkbox(ctx, "Lier la hauteur à la vitesse##wave_pitch_link", p.pitch_link)
+    local cl, linked = reaper.ImGui_Checkbox(ctx, X.T("Lier la hauteur à la vitesse##wave_pitch_link"), p.pitch_link)
     if cl then p.pitch_link = linked; commit() end
     reaper.ImGui_EndGroup(ctx)
 
@@ -5066,7 +5499,7 @@ function X.draw_play_settings(a)
     end
     reaper.ImGui_DrawList_AddRect(reaper.ImGui_GetWindowDrawList(ctx), bx, by, bx + bw, by + bh, 0xFF777777, 0, 0, X.S(1))
 
-    if reaper.ImGui_Button(ctx, "Ajouter##preset_add") then
+    if reaper.ImGui_Button(ctx, X.T("Ajouter##preset_add")) then
       local np = X.clone_table(p)
       np.id = X.preset_free_id(a)
       np.custom = false
@@ -5074,17 +5507,17 @@ function X.draw_play_settings(a)
       a.presets[#a.presets + 1] = np
       a.preset_edit = np.id
       X.save()
-      status = "Preset " .. np.id .. " ajouté (copie de " .. p.id .. ")."
+      status = "Preset " .. np.id .. X.T(" ajouté (copie de ") .. p.id .. ")."
     end
     reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_Button(ctx, "Renommer##preset_rename_btn") then
+    if reaper.ImGui_Button(ctx, X.T("Renommer##preset_rename_btn")) then
       X.preset_rename = {id = a.id, buf = p.name, focus = true}
-      reaper.ImGui_OpenPopup(ctx, "Renommer le preset##preset_rename")
+      reaper.ImGui_OpenPopup(ctx, X.T("Renommer le preset##preset_rename"))
     end
     reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_Button(ctx, "Supprimer##preset_del") then
+    if reaper.ImGui_Button(ctx, X.T("Supprimer##preset_del")) then
       if #a.presets <= 1 then
-        status = "Impossible de supprimer le dernier preset de la cue."
+        status = X.T("Impossible de supprimer le dernier preset de la cue.")
       else
         for k, q in ipairs(a.presets) do
           if q.id == p.id then table.remove(a.presets, k); break end
@@ -5092,18 +5525,18 @@ function X.draw_play_settings(a)
         a.preset_edit = a.presets[1].id
         if not X.preset_by_id(a, a.preset_recall) then a.preset_recall = a.presets[1].id end
         X.save()
-        status = "Preset " .. p.id .. " supprimé."
+        status = "Preset " .. p.id .. X.T(" supprimé.")
       end
     end
 
-    if reaper.ImGui_BeginPopup(ctx, "Renommer le preset##preset_rename") then
+    if reaper.ImGui_BeginPopup(ctx, X.T("Renommer le preset##preset_rename")) then
       local rn = X.preset_rename
       if rn and rn.id == a.id then
         if rn.focus then reaper.ImGui_SetKeyboardFocusHere(ctx); rn.focus = false end
-        local cn, nv = reaper.ImGui_InputText(ctx, "Nom##preset_name_in", rn.buf)
+        local cn, nv = reaper.ImGui_InputText(ctx, X.T("Nom##preset_name_in"), rn.buf)
         if cn then rn.buf = nv end
-        reaper.ImGui_TextDisabled(ctx, "Laisser vide = nom automatique")
-        if reaper.ImGui_Button(ctx, "Valider##preset_name_ok") then
+        reaper.ImGui_TextDisabled(ctx, X.T("Laisser vide = nom automatique"))
+        if reaper.ImGui_Button(ctx, X.T("Valider##preset_name_ok")) then
           local nm = tostring(rn.buf or ""):match("^%s*(.-)%s*$")
           if nm == "" then
             p.custom = false
@@ -5117,7 +5550,7 @@ function X.draw_play_settings(a)
           reaper.ImGui_CloseCurrentPopup(ctx)
         end
         reaper.ImGui_SameLine(ctx)
-        if reaper.ImGui_Button(ctx, "Annuler##preset_name_cancel") then
+        if reaper.ImGui_Button(ctx, X.T("Annuler##preset_name_cancel")) then
           X.preset_rename = nil
           reaper.ImGui_CloseCurrentPopup(ctx)
         end
@@ -5127,7 +5560,7 @@ function X.draw_play_settings(a)
       reaper.ImGui_EndPopup(ctx)
     end
 
-    reaper.ImGui_Text(ctx, "Rappelé au lancement :")
+    reaper.ImGui_Text(ctx, X.T("Rappelé au lancement :"))
     reaper.ImGui_SetNextItemWidth(ctx, bw)
     local rp = X.preset_by_id(a, a.preset_recall)
     if reaper.ImGui_BeginCombo(ctx, "##preset_recall", rp and (rp.id .. " · " .. rp.name) or "?") then
@@ -5141,9 +5574,9 @@ function X.draw_play_settings(a)
     end
     reaper.ImGui_EndGroup(ctx)
 
-    reaper.ImGui_TextDisabled(ctx, "Les réglages ci-dessus modifient le preset sélectionné. ▶ = preset rappelé à chaque lancement de la cue (par défaut 0).")
-    reaper.ImGui_TextDisabled(ctx, "Stretch : BPM source requis (métadonnées ou nom du fichier, ex. 120bpm). Sans BPM détecté, la vitesse reste inchangée.")
-    reaper.ImGui_TextDisabled(ctx, "Une action PRESET (+ Preset) peut rappeler un autre preset sur une cue en cours de lecture, avec une transition.")
+    reaper.ImGui_TextDisabled(ctx, X.T("Les réglages ci-dessus modifient le preset sélectionné. ▶ = preset rappelé à chaque lancement de la cue (par défaut 0)."))
+    reaper.ImGui_TextDisabled(ctx, X.T("Stretch : BPM source requis (métadonnées ou nom du fichier, ex. 120bpm). Sans BPM détecté, la vitesse reste inchangée."))
+    reaper.ImGui_TextDisabled(ctx, X.T("Une action PRESET (+ Preset) peut rappeler un autre preset sur une cue en cours de lecture, avec une transition."))
   end
 end
 
@@ -5186,9 +5619,9 @@ end
 
 function X.draw_wave_editor(a)
   if not a.file or a.file == "" then
-    reaper.ImGui_TextDisabled(ctx, "Aucun fichier chargé. Glisse un fichier audio ou vidéo dans la zone ci-dessous.")
-    if reaper.ImGui_Button(ctx, "Charger un fichier audio...##wave_load_empty") then
-      local ok, f = reaper.GetUserFileNameForRead("", "Fichier audio", "")
+    reaper.ImGui_TextDisabled(ctx, X.T("Aucun fichier chargé. Glisse un fichier audio ou vidéo dans la zone ci-dessous."))
+    if reaper.ImGui_Button(ctx, X.T("Charger un fichier audio...##wave_load_empty")) then
+      local ok, f = reaper.GetUserFileNameForRead("", X.T("Fichier audio"), "")
       if ok and f ~= "" then X.assign_audio_file(a, f) end
     end
     local drop_w = math.max(X.S(260), select(1, reaper.ImGui_GetContentRegionAvail(ctx)) - X.S(8))
@@ -5197,7 +5630,7 @@ function X.draw_wave_editor(a)
     local ex, ey = reaper.ImGui_GetItemRectMax(ctx)
     local ddl = reaper.ImGui_GetWindowDrawList(ctx)
     reaper.ImGui_DrawList_AddRect(ddl, dx, dy, ex, ey, 0xFF777777, 0, 0, X.S(1))
-    reaper.ImGui_DrawList_AddText(ddl, dx + X.S(16), dy + X.S(38), 0xFFBBBBBB, "Déposer le fichier audio ici")
+    reaper.ImGui_DrawList_AddText(ddl, dx + X.S(16), dy + X.S(38), 0xFFBBBBBB, X.T("Déposer le fichier audio ici"))
     X.accept_audio_file_drop(a)
     return
   end
@@ -5209,12 +5642,12 @@ function X.draw_wave_editor(a)
   a.wave_pitch_link = a.wave_pitch_link and true or false
   a.wave_reverse = a.wave_reverse and true or false
   a.wave_stretch_tempo = a.wave_stretch_tempo and true or false
-  if reaper.ImGui_Button(ctx, "Remplacer le fichier...##wave_replace") then
-    local ok, f = reaper.GetUserFileNameForRead(a.file, "Remplacer le fichier audio", "")
+  if reaper.ImGui_Button(ctx, X.T("Remplacer le fichier...##wave_replace")) then
+    local ok, f = reaper.GetUserFileNameForRead(a.file, X.T("Remplacer le fichier audio"), "")
     if ok and f ~= "" then X.assign_audio_file(a, f) end
   end
   reaper.ImGui_SameLine(ctx)
-  if reaper.ImGui_Button(ctx, "Supprimer fichier##wave_clear") then
+  if reaper.ImGui_Button(ctx, X.T("Supprimer fichier##wave_clear")) then
     a.file, a.inpt, a.outpt, a.env = nil, nil, nil, nil
     a.markers, a.marker_name = {}, "Q1"
     a.view_zoom, a.view_offset = 1.0, 0.0
@@ -5225,20 +5658,20 @@ function X.draw_wave_editor(a)
     return
   end
   reaper.ImGui_SameLine(ctx)
-  if reaper.ImGui_Button(ctx, "Régénérer forme d'onde##wave_regen") then X.regenerate_wave(a.file) end
+  if reaper.ImGui_Button(ctx, X.T("Régénérer forme d'onde##wave_regen")) then X.regenerate_wave(a.file) end
   reaper.ImGui_Separator(ctx)
   a.markers = type(a.markers) == "table" and a.markers or {}
   a.marker_name = a.marker_name or "Q1"
   local w = X.get_wave(a.file)
   if w.err then
     reaper.ImGui_Text(ctx, w.err)
-    if reaper.ImGui_SmallButton(ctx, "Reconstruire la forme d'onde##wv") then
+    if reaper.ImGui_SmallButton(ctx, X.T("Reconstruire la forme d'onde##wv")) then
       local ok, msg = X.rebuild_wave_peaks(a.file)
       wave_cache[a.file] = nil
       if ok then
-        status = "Reconstruction des peaks demandée à REAPER : " .. tostring(a.file)
+        status = X.T("Reconstruction des peaks demandée à REAPER : ") .. tostring(a.file)
       else
-        status = msg or "REAPER n'a pas pu reconstruire les peaks."
+        status = msg or X.T("REAPER n'a pas pu reconstruire les peaks.")
       end
     end
     return
@@ -5256,7 +5689,7 @@ function X.draw_wave_editor(a)
   X.cap_n[a.id] = X.cap_n[a.id] or 0
 
   reaper.ImGui_SetNextItemWidth(ctx, X.S(90))
-  local c1, v1 = reaper.ImGui_InputDouble(ctx, "Entrée (s)##in", a.inpt, 0, 0, "%.3f")
+  local c1, v1 = reaper.ImGui_InputDouble(ctx, X.T("Entrée (s)##in"), a.inpt, 0, 0, "%.3f")
   if c1 then
     local old = a.inpt
     a.inpt = math.max(0, math.min(v1, a.outpt - 0.05))
@@ -5265,7 +5698,7 @@ function X.draw_wave_editor(a)
   end
   reaper.ImGui_SameLine(ctx)
   reaper.ImGui_SetNextItemWidth(ctx, X.S(90))
-  local c2, v2 = reaper.ImGui_InputDouble(ctx, "Sortie (s)##out", a.outpt, 0, 0, "%.3f")
+  local c2, v2 = reaper.ImGui_InputDouble(ctx, X.T("Sortie (s)##out"), a.outpt, 0, 0, "%.3f")
   if c2 then
     local old = a.outpt
     a.outpt = math.max(a.inpt + 0.05, math.min(v2, L))
@@ -5273,12 +5706,12 @@ function X.draw_wave_editor(a)
     X.apply_cue_changes(a); X.save()
   end
   reaper.ImGui_SameLine(ctx)
-  if reaper.ImGui_SmallButton(ctx, "Tout##full") then
+  if reaper.ImGui_SmallButton(ctx, X.T("Tout##full")) then
     a.inpt, a.outpt, a.loop_in, a.loop_out = 0, L, 0, L
     X.apply_cue_changes(a); X.save()
   end
 
-  local c3, lp = reaper.ImGui_Checkbox(ctx, "Boucle##loop", a.loop or false)
+  local c3, lp = reaper.ImGui_Checkbox(ctx, X.T("Boucle##loop"), a.loop or false)
   if c3 then a.loop = lp; X.save() end
   reaper.ImGui_SameLine(ctx)
   reaper.ImGui_SetNextItemWidth(ctx, X.S(50))
@@ -5312,9 +5745,9 @@ function X.draw_wave_editor(a)
       if X.devamp_run(a.id) then
         -- statut posé par devamp_run
       elseif run and (run.devamp or run.devamp_armed) then
-        status = "Devamp déjà armé."
+        status = X.T("Devamp déjà armé.")
       else
-        status = "Devamp : lance d'abord la cue en boucle."
+        status = X.T("Devamp : lance d'abord la cue en boucle.")
       end
     end
     if blink then reaper.ImGui_PopStyleColor(ctx, 2) end
@@ -5323,17 +5756,17 @@ function X.draw_wave_editor(a)
   do
     local run = runs[a.id]
     local paused = run and run.paused
-    local label = paused and "Reprendre##wave_pause" or "Pause##wave_pause"
+    local label = paused and X.T("Reprendre##wave_pause") or "Pause##wave_pause"
     if reaper.ImGui_SmallButton(ctx, label) then
       if run and run.alive then
         if not run.paused then X.pause_run(a.id, 0) else X.resume_run(a.id, 0) end
       else
-        status = "Pause : aucune lecture en cours pour cette cue."
+        status = X.T("Pause : aucune lecture en cours pour cette cue.")
       end
     end
   end
   reaper.ImGui_SameLine(ctx)
-  reaper.ImGui_TextDisabled(ctx, string.format("fichier %.2f s  |  IN→OUT %.2f s  |  Li→Lo %.2f s",
+  reaper.ImGui_TextDisabled(ctx, string.format(X.T("fichier %.2f s  |  IN→OUT %.2f s  |  Li→Lo %.2f s"),
     L, a.outpt - a.inpt, a.loop_out - a.loop_in))
 
   local avail_w = select(1, reaper.ImGui_GetContentRegionAvail(ctx))
@@ -5677,7 +6110,7 @@ function X.draw_wave_editor(a)
         cw = cw
       }
       cv_drag, marker_drag, wf_drag = nil, nil, nil
-      status = "Ctrl + glisser : navigation dans la forme d'onde."
+      status = X.T("Ctrl + glisser : navigation dans la forme d'onde.")
     elseif in_wave_body and clicked_left and not alt and not ctrl then
       -- Clic normal = seek source, calé sur l'item de la cue sous la playhead (gère les boucles).
       local source_t = math.max(a.inpt, math.min(a.outpt, xt(mx)))
@@ -5713,9 +6146,9 @@ function X.draw_wave_editor(a)
         end
         -- seekplay=true : déplace la tête de lecture en cours sans redémarrer le transport.
         reaper.SetEditCurPos2(PROJ, project_t, false, true)
-        status = string.format("Lecture déplacée à %.3f s (source).", source_t)
+        status = string.format(X.T("Lecture déplacée à %.3f s (source)."), source_t)
       else
-        status = "Clic : la cue doit être en lecture pour déplacer sa tête de lecture."
+        status = X.T("Clic : la cue doit être en lecture pour déplacer sa tête de lecture.")
       end
       cv_drag, marker_drag = nil, nil
     elseif marker_hit then
@@ -5727,14 +6160,14 @@ function X.draw_wave_editor(a)
           button = X.C_RIGHT
         }
         cv_drag = nil
-        status = "Déplacement du marqueur " .. tostring(a.markers[marker_hit].name or "") .. "."
+        status = X.T("Déplacement du marqueur ") .. tostring(a.markers[marker_hit].name or "") .. "."
       elseif clicked_left and alt then
         local removed = table.remove(a.markers, marker_hit)
         marker_drag, cv_drag = nil, nil
         X.marker_sel[a.id] = nil
         X.refresh_item_markers(a)
         X.save()
-        status = "Marqueur " .. tostring(removed and removed.name or "") .. " supprimé."
+        status = X.T("Marqueur ") .. tostring(removed and removed.name or "") .. X.T(" supprimé.")
       end
     elseif in_wave_body and (alt or clicked_right) then
       if clicked_right then
@@ -5785,7 +6218,7 @@ function X.draw_wave_editor(a)
       X.marker_sel[a.id] = nil
       X.refresh_item_markers(a)
       X.save()
-      status = "Position des marqueurs enregistrée."
+      status = X.T("Position des marqueurs enregistrée.")
     end
   end
   if wf_drag then
@@ -5898,19 +6331,19 @@ function X.draw_wave_editor(a)
       else
         X.fade_drag = nil
         X.save()
-        status = "Fondus modifiés : pris en compte au prochain lancement de la cue."
+        status = X.T("Fondus modifiés : pris en compte au prochain lancement de la cue.")
       end
     end
 
     if reaper.ImGui_BeginPopup(ctx, "##fadecurve_menu") then
       local which = X.fade_menu_which or "in"
       local key = (which == "in") and "fadein_dir" or "fadeout_dir"
-      reaper.ImGui_TextDisabled(ctx, which == "in" and "Courbe du fade in" or "Courbe du fade out")
+      reaper.ImGui_TextDisabled(ctx, which == "in" and X.T("Courbe du fade in") or X.T("Courbe du fade out"))
       reaper.ImGui_Separator(ctx)
       local presets = {
-        {"Linéaire", 0},
-        {"Rapide au début (logarithmique)", 0.7},
-        {"Lent au début (exponentielle)", -0.7},
+        {X.T("Linéaire"), 0},
+        {X.T("Rapide au début (logarithmique)"), 0.7},
+        {X.T("Lent au début (exponentielle)"), -0.7},
       }
       for _, pr in ipairs(presets) do
         if reaper.ImGui_Selectable(ctx, pr[1] .. "##fadepre" .. which .. pr[2]) then
@@ -5922,17 +6355,17 @@ function X.draw_wave_editor(a)
       reaper.ImGui_EndPopup(ctx)
     end
   end
-  reaper.ImGui_TextDisabled(ctx, "Fondus sur la forme d'onde : carré = durée  |  point central fixe = glisser vers le haut/bas pour la courbure (exp ↔ log)  |  clic droit = préréglages")
+  reaper.ImGui_TextDisabled(ctx, X.T("Fondus sur la forme d'onde : carré = durée  |  point central fixe = glisser vers le haut/bas pour la courbure (exp ↔ log)  |  clic droit = préréglages"))
   if body_hover then
     local g = X.frac_to_g(1 - (my - yb0)/hw)
     reaper.ImGui_Text(ctx, string.format("t = %.3f s   gain = %s", xt(mx),
       g <= 0 and "-inf" or string.format("%.1f dB", 20*math.log(g,10))))
   end
-  reaper.ImGui_TextDisabled(ctx, "Clic = tête de lecture  |  Alt+clic = courbe  |  Ctrl+clic = supprimer un point")
-  if reaper.ImGui_SmallButton(ctx, "Réinitialiser la courbe##envreset") then a.env = {}; X.save() end
+  reaper.ImGui_TextDisabled(ctx, X.T("Clic = tête de lecture  |  Alt+clic = courbe  |  Ctrl+clic = supprimer un point"))
+  if reaper.ImGui_SmallButton(ctx, X.T("Réinitialiser la courbe##envreset")) then a.env = {}; X.save() end
 
   reaper.ImGui_Separator(ctx)
-  reaper.ImGui_Text(ctx, "Marqueurs de la source (temps en secondes)")
+  reaper.ImGui_Text(ctx, X.T("Marqueurs de la source (temps en secondes)"))
 
   local msel = X.marker_sel[a.id]
   if msel and not a.markers[msel] then msel = nil; X.marker_sel[a.id] = nil end
@@ -5942,7 +6375,7 @@ function X.draw_wave_editor(a)
       if tostring(a.markers[k].name or "") == "" then mtarget = k; break end
     end
   end
-  if reaper.ImGui_Button(ctx, "Ajouter marqueur##mk_add") then
+  if reaper.ImGui_Button(ctx, X.T("Ajouter marqueur##mk_add")) then
     local lo = math.max(0, math.min(L, a.inpt or 0))
     local hi = math.max(lo, math.min(L, a.outpt or L))
     local best_t, best_gap = (lo + hi) * 0.5, -1
@@ -5965,38 +6398,38 @@ function X.draw_wave_editor(a)
       if m == newm then X.marker_sel[a.id] = k; X.marker_focus = {id = a.id, idx = k}; break end
     end
     X.save()
-    status = string.format("Marqueur créé à %.3f s : saisis l'ID (ex. Q3) ou clique « Capturer cues ».", best_t)
+    status = string.format(X.T("Marqueur créé à %.3f s : saisis l'ID (ex. Q3) ou clique « Capturer cues »."), best_t)
   end
   reaper.ImGui_SameLine(ctx)
   local _, npicked = X.picked_any_names()
-  local cap_label = string.format("Capturer cues (%d) → %s###mk_capture", npicked,
-    mtarget and ("marqueur " .. mtarget) or "aucun marqueur")
+  local cap_label = string.format(X.T("Capturer cues (%d) → %s###mk_capture"), npicked,
+    mtarget and (X.T("marqueur ") .. mtarget) or X.T("aucun marqueur"))
   if reaper.ImGui_Button(ctx, cap_label) then
     local names, n = X.picked_any_names()
     if not mtarget then
-      status = "Crée un marqueur (Ajouter marqueur) ou clique dans le champ du marqueur à renseigner."
+      status = X.T("Crée un marqueur (Ajouter marqueur) ou clique dans le champ du marqueur à renseigner.")
     elseif n == 0 then
-      status = "Aucune action sélectionnée : clique d'abord le TITRE d'une ligne dans la liste (Ctrl/Maj pour plusieurs)."
+      status = X.T("Aucune action sélectionnée : clique d'abord le TITRE d'une ligne dans la liste (Ctrl/Maj pour plusieurs).")
     else
       a.markers[mtarget].name = names
       X.marker_sel[a.id] = mtarget
       X.cap_n[a.id] = X.cap_n[a.id] + 1
       X.refresh_item_markers(a)
       X.save()
-      status = n .. " action(s) capturée(s) dans le marqueur " .. mtarget .. " : " .. names
+      status = n .. X.T(" action(s) capturée(s) dans le marqueur ") .. mtarget .. " : " .. names
     end
   end
   reaper.ImGui_SameLine(ctx)
-  if reaper.ImGui_Button(ctx, "Supprimer##mk_delete") then
+  if reaper.ImGui_Button(ctx, X.T("Supprimer##mk_delete")) then
     if msel then X.delete_marker = {id = a.id, idx = msel}
-    else status = "Clique d'abord dans le champ du marqueur à supprimer." end
+    else status = X.T("Clique d'abord dans le champ du marqueur à supprimer.") end
   end
   local sel_names = X.picked_any_names()
-  reaper.ImGui_TextDisabled(ctx, "Sélection : " .. (sel_names ~= "" and sel_names or "(aucune)")
-    .. "   |   Marqueur visé : " .. (mtarget and tostring(mtarget) or "—"))
+  reaper.ImGui_TextDisabled(ctx, X.T("Sélection : ") .. (sel_names ~= "" and sel_names or X.T("(aucune)"))
+    .. X.T("   |   Marqueur visé : ") .. (mtarget and tostring(mtarget) or "—"))
 
   if #a.markers == 0 then
-    reaper.ImGui_TextDisabled(ctx, "Aucun marqueur.")
+    reaper.ImGui_TextDisabled(ctx, X.T("Aucun marqueur."))
   else
     local remove_marker, markers_changed = nil, false
     if X.delete_marker and X.delete_marker.id == a.id then
@@ -6011,7 +6444,7 @@ function X.draw_wave_editor(a)
       reaper.ImGui_Text(ctx, X.marker_sel[a.id] == i and "►" or " ")
       reaper.ImGui_SameLine(ctx)
       reaper.ImGui_SetNextItemWidth(ctx, X.S(80))
-      local ct, mt = reaper.ImGui_InputDouble(ctx, "Temps##marktime", tonumber(marker.t) or 0, 0, 0, "%.3f")
+      local ct, mt = reaper.ImGui_InputDouble(ctx, X.T("Temps##marktime"), tonumber(marker.t) or 0, 0, 0, "%.3f")
       if ct then marker.t = math.max(0, math.min(L, mt)); markers_changed = true end
       reaper.ImGui_SameLine(ctx)
       reaper.ImGui_SetNextItemWidth(ctx, X.S(220))
@@ -6033,7 +6466,7 @@ function X.draw_wave_editor(a)
       table.remove(a.markers, remove_marker)
       X.marker_sel[a.id] = nil
       markers_changed = true
-      status = "Marqueur supprimé de la cue."
+      status = X.T("Marqueur supprimé de la cue.")
     end
     if markers_changed then
       local sorted = true
@@ -6049,14 +6482,14 @@ function X.draw_wave_editor(a)
       X.save()
     end
   end
-  reaper.ImGui_TextDisabled(ctx, "Seuls les marqueurs situés entre IN et OUT seront copiés sur l'item.")
+  reaper.ImGui_TextDisabled(ctx, X.T("Seuls les marqueurs situés entre IN et OUT seront copiés sur l'item."))
   X.draw_play_settings(a)
 end
 
 ---------------------------------------------------------------- Éditeur d'action
 -- Onglet "Snapshot lié" commun (cue, stop, pause, devamp).
 function X.draw_linked_snapshot_tab(a, time_label)
-  local c6, hp = reaper.ImGui_Checkbox(ctx, "Lier un état de pistes à cette action##hassnap", a.has_snapshot or false)
+  local c6, hp = reaper.ImGui_Checkbox(ctx, X.T("Lier un état de pistes à cette action##hassnap"), a.has_snapshot or false)
   if c6 then a.has_snapshot = hp; X.save() end
   if a.has_snapshot then
     -- Projet source du preset lié (indépendant de a.projfn, qui pour un CUE
@@ -6064,8 +6497,8 @@ function X.draw_linked_snapshot_tab(a, time_label)
     local lib = X.find_project(a.snap_projfn)
     local none = (not a.snap_projfn or a.snap_projfn == "")
     local plabel = none and X.project_label(PROJ)
-      or ((a.snap_projfn:match("([^/\\]+)$") or a.snap_projfn)..(lib and "" or " (non ouvert)"))
-    if reaper.ImGui_BeginCombo(ctx, "Projet source du snapshot##linked_projsrc", plabel) then
+      or ((a.snap_projfn:match("([^/\\]+)$") or a.snap_projfn)..(lib and "" or X.T(" (non ouvert)")))
+    if reaper.ImGui_BeginCombo(ctx, X.T("Projet source du snapshot##linked_projsrc"), plabel) then
       if reaper.ImGui_Selectable(ctx, X.project_label(PROJ).."##lproj0", none) then
         a.snap_projfn = nil; X.save()
       end
@@ -6086,9 +6519,9 @@ end
 
 -- Sélection des cues ciblées (même mode pour STOP, PAUSE, DEVAMP).
 function X.draw_targets_editor(a, kind)
-  local verbs = {stop = "arrêter", pause = "mettre en pause / reprendre", devamp = "passer en Devamp", preset = "modifier avec un preset"}
+  local verbs = {stop = X.T("arrêter"), pause = X.T("mettre en pause / reprendre"), devamp = X.T("passer en Devamp"), preset = X.T("modifier avec un preset")}
   local pre = "##" .. kind .. "_"
-  reaper.ImGui_Text(ctx, "IDs des cues à " .. (verbs[kind] or "cibler") .. " (ex. Q1,Q8). Les IDs peuvent appartenir à n'importe quel onglet.")
+  reaper.ImGui_Text(ctx, X.T("IDs des cues à ") .. (verbs[kind] or X.T("cibler")) .. X.T(" (ex. Q1,Q8). Les IDs peuvent appartenir à n'importe quel onglet."))
   local target_text = a.targets_text
   if target_text == nil then
     local parts = {}
@@ -6096,7 +6529,7 @@ function X.draw_targets_editor(a, kind)
     target_text = table.concat(parts, ",")
     a.targets_text = target_text
   end
-  local ct, new_target_text = reaper.ImGui_InputText(ctx, "IDs ciblés" .. pre .. "targets_text", target_text)
+  local ct, new_target_text = reaper.ImGui_InputText(ctx, X.T("IDs ciblés") .. pre .. "targets_text", target_text)
   if ct then
     a.targets_text = new_target_text
     local ids, seen, invalid = {}, {}, false
@@ -6117,7 +6550,7 @@ function X.draw_targets_editor(a, kind)
       a.targets_text_error = nil
       X.save()
     else
-      a.targets_text_error = "Format invalide : utilise Q1,Q8 (IDs numériques séparés par des virgules)."
+      a.targets_text_error = X.T("Format invalide : utilise Q1,Q8 (IDs numériques séparés par des virgules).")
     end
   end
   if a.targets_text_error then reaper.ImGui_TextColored(ctx, 0xFF4033FF, a.targets_text_error) end
@@ -6133,13 +6566,13 @@ function X.draw_targets_editor(a, kind)
       end
     end
     if #blocked > 0 then
-      reaper.ImGui_TextColored(ctx, 0xF39C12FF, "Attention : les cibles REGION " .. table.concat(blocked, ", ") .. " ne seront pas mises en pause. Retire-les de la liste ; seules les cues AUDIO sont prises en charge.")
+      reaper.ImGui_TextColored(ctx, 0xF39C12FF, X.T("Attention : les cibles REGION ") .. table.concat(blocked, ", ") .. X.T(" ne seront pas mises en pause. Retire-les de la liste ; seules les cues AUDIO sont prises en charge."))
     else
-      reaper.ImGui_TextDisabled(ctx, "PAUSE / UNPAUSE : seules les cues AUDIO sont prises en charge. Les régions seront ignorées.")
+      reaper.ImGui_TextDisabled(ctx, X.T("PAUSE / UNPAUSE : seules les cues AUDIO sont prises en charge. Les régions seront ignorées."))
     end
   end
 
-  if reaper.ImGui_Button(ctx, "Capturer les cues sélectionnées (tous onglets)" .. pre .. "capture") then
+  if reaper.ImGui_Button(ctx, X.T("Capturer les cues sélectionnées (tous onglets)") .. pre .. "capture") then
     local ids = {}
     for _, tab in ipairs(tabs or {}) do
       for _, x in ipairs(tab.actions or {}) do
@@ -6147,33 +6580,33 @@ function X.draw_targets_editor(a, kind)
       end
     end
     if #ids == 0 then
-      status = "Aucune cue sélectionnée dans les onglets."
+      status = X.T("Aucune cue sélectionnée dans les onglets.")
     else
       a.targets = ids
       local parts = {}; for _, id in ipairs(ids) do parts[#parts+1] = "Q"..tostring(id) end
       a.targets_text = table.concat(parts, ",")
       a.targets_text_error = nil
-      X.save(); status = #ids.." cue(s) ciblée(s)."
+      X.save(); status = #ids..X.T(" cue(s) ciblée(s).")
     end
   end
   reaper.ImGui_SameLine(ctx)
-  if reaper.ImGui_Button(ctx, "Toutes les cues" .. pre .. "all") then
+  if reaper.ImGui_Button(ctx, X.T("Toutes les cues") .. pre .. "all") then
     a.targets = nil; a.targets_text = ""; a.targets_text_error = nil; X.save()
   end
 
   if a.targets and #a.targets > 0 then
-    reaper.ImGui_Text(ctx, "Cues ciblées :")
+    reaper.ImGui_Text(ctx, X.T("Cues ciblées :"))
     for _, id in ipairs(a.targets) do
-      local nmx, tabname = "(ID introuvable)", "(onglet inconnu)"
+      local nmx, tabname = X.T("(ID introuvable)"), X.T("(onglet inconnu)")
       for _, tab in ipairs(tabs or {}) do
         for _, x in ipairs(tab.actions or {}) do
-          if tostring(x.id) == tostring(id) then nmx, tabname = (x.name or "Cue"), (tab.name or "Liste"); break end
+          if tostring(x.id) == tostring(id) then nmx, tabname = (x.name or "Cue"), X.dn(tab.name or X.T("Liste")); break end
         end
       end
       reaper.ImGui_BulletText(ctx, string.format("Q%s — %s (%s)", tostring(id), nmx, tabname))
     end
   else
-    reaper.ImGui_Text(ctx, "Cible : toutes les cues (aucune liste d'IDs saisie).")
+    reaper.ImGui_Text(ctx, X.T("Cible : toutes les cues (aucune liste d'IDs saisie)."))
   end
 
   -- DEVAMP : la cible reste disponible pour les sources AUDIO comme REGION.
@@ -6197,12 +6630,12 @@ function X.draw_targets_editor(a, kind)
 
     if has_region_source then
       reaper.ImGui_Separator(ctx)
-      local cxf, xf = reaper.ImGui_InputDouble(ctx, "Crossfade entre régions (s)##devamp_crossfade", tonumber(a.devamp_crossfade) or 0)
+      local cxf, xf = reaper.ImGui_InputDouble(ctx, X.T("Crossfade entre régions (s)##devamp_crossfade"), tonumber(a.devamp_crossfade) or 0)
       if cxf then a.devamp_crossfade = math.max(0, math.min(30, xf)); X.save() end
-      reaper.ImGui_TextDisabled(ctx, "Utilisé seulement si la cible après Devamp est une REGION. 0 = sans crossfade.")
+      reaper.ImGui_TextDisabled(ctx, X.T("Utilisé seulement si la cible après Devamp est une REGION. 0 = sans crossfade."))
     end
     if has_audio_source then
-      reaper.ImGui_TextDisabled(ctx, "Pour une source AUDIO, le Devamp sort sur sa propre boucle ; la cible démarre ensuite sans crossfade de région.")
+      reaper.ImGui_TextDisabled(ctx, X.T("Pour une source AUDIO, le Devamp sort sur sa propre boucle ; la cible démarre ensuite sans crossfade de région."))
     end
 
     -- Pour une source AUDIO seule, le Devamp termine sur sa propre boucle :
@@ -6212,14 +6645,14 @@ function X.draw_targets_editor(a, kind)
     local show_chain_after_devamp = not (has_audio_source and not has_region_source)
     if show_chain_after_devamp then
     reaper.ImGui_Separator(ctx)
-    reaper.ImGui_Text(ctx, "Enchaîner après le Devamp (optionnel) :")
-    reaper.ImGui_TextDisabled(ctx, "La cible peut être une cue AUDIO ou REGION. Le crossfade ne s'applique qu'à REGION → REGION.")
+    reaper.ImGui_Text(ctx, X.T("Enchaîner après le Devamp (optionnel) :"))
+    reaper.ImGui_TextDisabled(ctx, X.T("La cible peut être une cue AUDIO ou REGION. Le crossfade ne s'applique qu'à REGION → REGION."))
     local to_text = a.devamp_to_text
     if to_text == nil then
       to_text = a.devamp_to and ("Q"..tostring(a.devamp_to)) or ""
       a.devamp_to_text = to_text
     end
-    local ct2, new_to = reaper.ImGui_InputText(ctx, "Cible après Devamp##devamp_to_text", to_text)
+    local ct2, new_to = reaper.ImGui_InputText(ctx, X.T("Cible après Devamp##devamp_to_text"), to_text)
     if ct2 then
       a.devamp_to_text = new_to
       local digits = new_to:match("^%s*[Qq]?(%d+)%s*$")
@@ -6240,16 +6673,16 @@ function X.draw_targets_editor(a, kind)
           a.devamp_to_error = nil
           X.save()
         else
-          a.devamp_to_error = "La cible doit être une cue AUDIO ou REGION (ex. Q12)."
+          a.devamp_to_error = X.T("La cible doit être une cue AUDIO ou REGION (ex. Q12).")
         end
       else
-        a.devamp_to_error = "Format : Q12 (un seul ID de cue AUDIO ou REGION)."
+        a.devamp_to_error = X.T("Format : Q12 (un seul ID de cue AUDIO ou REGION).")
       end
     end
     if a.devamp_to_error then
       reaper.ImGui_TextColored(ctx, 0xFF4033FF, a.devamp_to_error)
     end
-    if reaper.ImGui_Button(ctx, "Capturer la sélection comme cible après Devamp##devamp_to_cap") then
+    if reaper.ImGui_Button(ctx, X.T("Capturer la sélection comme cible après Devamp##devamp_to_cap")) then
       local one
       for _, tab in ipairs(tabs or {}) do
         for _, x in ipairs(tab.actions or {}) do
@@ -6265,22 +6698,22 @@ function X.draw_targets_editor(a, kind)
         a.devamp_to_text = "Q"..tostring(one)
         a.devamp_to_error = nil
         X.save()
-        status = "Devamp enchaînera vers Q"..tostring(one).."."
+        status = X.T("Devamp enchaînera vers Q")..tostring(one).."."
       else
-        status = "Sélectionnez exactement une cue AUDIO ou REGION comme cible après Devamp."
+        status = X.T("Sélectionnez exactement une cue AUDIO ou REGION comme cible après Devamp.")
       end
     end
     if a.devamp_to then
-      local nmx, tabname = "(introuvable)", "?"
+      local nmx, tabname = X.T("(introuvable)"), "?"
       for _, tab in ipairs(tabs or {}) do
         for _, x in ipairs(tab.actions or {}) do
           if tostring(x.id) == tostring(a.devamp_to) then
-            nmx, tabname = (x.name or "?"), (tab.name or "?")
+            nmx, tabname = (x.name or "?"), X.dn(tab.name or "?")
             break
           end
         end
       end
-      reaper.ImGui_BulletText(ctx, string.format("Après Devamp → Q%s — %s (%s)", tostring(a.devamp_to), nmx, tabname))
+      reaper.ImGui_BulletText(ctx, string.format(X.T("Après Devamp → Q%s — %s (%s)"), tostring(a.devamp_to), nmx, tabname))
     end
     end -- show_chain_after_devamp
   end -- options de destination Devamp
@@ -6288,7 +6721,7 @@ end
 
 function X.draw_editor(a, i)
   reaper.ImGui_Separator(ctx)
-  local ch, v = reaper.ImGui_InputText(ctx, "Nom", a.name)
+  local ch, v = reaper.ImGui_InputText(ctx, X.T("Nom"), a.name)
   if ch then
     a.name = v
     -- STOP / PAUSE / DEVAMP : nommer manuellement fige le titre affiché
@@ -6300,10 +6733,10 @@ function X.draw_editor(a, i)
   end
   if (a.type == "stop" or a.type == "pause" or a.type == "devamp" or a.type == "preset") and a.custom_title then
     reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_SmallButton(ctx, "Titre auto##reset_title") then
+    if reaper.ImGui_SmallButton(ctx, X.T("Titre auto##reset_title")) then
       a.custom_title = nil
       X.save()
-      status = "Titre automatique restauré."
+      status = X.T("Titre automatique restauré.")
     end
   end
 
@@ -6313,13 +6746,13 @@ function X.draw_editor(a, i)
     a.src = "file"
     if reaper.ImGui_BeginTabBar(ctx, "cuetabs") then
       if reaper.ImGui_BeginTabItem(ctx, "Source") then
-        reaper.ImGui_Text(ctx, (a.file and a.file ~= "") and a.file or "(aucun fichier)")
-        if reaper.ImGui_Button(ctx, "Choisir un fichier...") then
-          local ok, f = reaper.GetUserFileNameForRead(a.file or "", "Fichier audio", "")
+        reaper.ImGui_Text(ctx, (a.file and a.file ~= "") and a.file or X.T("(aucun fichier)"))
+        if reaper.ImGui_Button(ctx, X.T("Choisir un fichier...")) then
+          local ok, f = reaper.GetUserFileNameForRead(a.file or "", X.T("Fichier audio"), "")
           if ok and f ~= "" then X.assign_audio_file(a, f) end
         end
         reaper.ImGui_SameLine(ctx)
-        if reaper.ImGui_Button(ctx, "Supprimer fichier##source_clear") then
+        if reaper.ImGui_Button(ctx, X.T("Supprimer fichier##source_clear")) then
           a.file, a.inpt, a.outpt, a.env = nil, nil, nil, nil
           a.markers, a.marker_name = {}, "Q1"
           a.view_zoom, a.view_offset = 1.0, 0.0
@@ -6327,10 +6760,10 @@ function X.draw_editor(a, i)
         end
         if a.file and a.file ~= "" then
           reaper.ImGui_SameLine(ctx)
-          if reaper.ImGui_Button(ctx, "Régénérer forme d'onde##source_regen") then X.regenerate_wave(a.file) end
+          if reaper.ImGui_Button(ctx, X.T("Régénérer forme d'onde##source_regen")) then X.regenerate_wave(a.file) end
         end
 
-        local c, g = X.track_combo("Piste cible", a.track, false)
+        local c, g = X.track_combo(X.T("Piste cible"), a.track, false)
         if c then a.track = g; X.save() end
 
         local c4, fi = reaper.ImGui_InputDouble(ctx, "Fade in (s)", a.fadein or 0)
@@ -6338,30 +6771,30 @@ function X.draw_editor(a, i)
         local c5, fo = reaper.ImGui_InputDouble(ctx, "Fade out (s)##cue_fadeout", a.fadeout or 0)
         if c5 then a.fadeout = math.max(0, fo); X.save() end
         reaper.ImGui_SetNextItemWidth(ctx, X.S(220))
-        local cfc, fc = reaper.ImGui_SliderDouble(ctx, "Courbe du fade##cue_curve", tonumber(a.fade_curve) or 0, 0, 1, "Léger  %.2f  Prononcé")
+        local cfc, fc = reaper.ImGui_SliderDouble(ctx, X.T("Courbe du fade##cue_curve"), tonumber(a.fade_curve) or 0, 0, 1, X.T("Léger  %.2f  Prononcé"))
         if cfc then a.fade_curve = math.max(0, math.min(1, fc)); X.save() end
-        reaper.ImGui_TextDisabled(ctx, "0 = linéaire ; augmentez le curseur pour accentuer la courbe des fades de cette cue.")
+        reaper.ImGui_TextDisabled(ctx, X.T("0 = linéaire ; augmentez le curseur pour accentuer la courbe des fades de cette cue."))
 
         reaper.ImGui_Separator(ctx)
-        local ca, auto_value = reaper.ImGui_Checkbox(ctx, "AUTO : délai depuis le déclenchement", a.auto == true)
+        local ca, auto_value = reaper.ImGui_Checkbox(ctx, X.T("AUTO : délai depuis le déclenchement"), a.auto == true)
         if ca then a.auto = auto_value; if auto_value then a.follow = false end; X.save() end
-        local cf, follow_value = reaper.ImGui_Checkbox(ctx, "FOLLOW : attendre la fin puis le délai", a.follow == true)
+        local cf, follow_value = reaper.ImGui_Checkbox(ctx, X.T("FOLLOW : attendre la fin puis le délai"), a.follow == true)
         if cf then a.follow = follow_value; if follow_value then a.auto = false end; X.save() end
         reaper.ImGui_SetNextItemWidth(ctx, X.S(110))
         local cd, delay_value = reaper.ImGui_InputDouble(ctx, "DELAY (s)##auto_delay", tonumber(a.delay) or 0, 0, 0, "%.2f")
         if cd then a.delay = math.max(0, delay_value); X.save() end
-        reaper.ImGui_TextDisabled(ctx, "AUTO et FOLLOW sont exclusifs. DELAY s'applique au mode choisi.")
+        reaper.ImGui_TextDisabled(ctx, X.T("AUTO et FOLLOW sont exclusifs. DELAY s'applique au mode choisi."))
 
         reaper.ImGui_EndTabItem(ctx)
       end
 
-      if reaper.ImGui_BeginTabItem(ctx, "Forme d'onde") then
+      if reaper.ImGui_BeginTabItem(ctx, X.T("Forme d'onde")) then
         X.draw_wave_editor(a)
         reaper.ImGui_EndTabItem(ctx)
       end
 
-      if reaper.ImGui_BeginTabItem(ctx, "Snapshot lié") then
-        X.draw_linked_snapshot_tab(a, "Lier le temps du snapshot au fade in")
+      if reaper.ImGui_BeginTabItem(ctx, X.T("Snapshot lié")) then
+        X.draw_linked_snapshot_tab(a, X.T("Lier le temps du snapshot au fade in"))
         reaper.ImGui_EndTabItem(ctx)
       end
       reaper.ImGui_EndTabBar(ctx)
@@ -6374,8 +6807,8 @@ function X.draw_editor(a, i)
       if reaper.ImGui_BeginTabItem(ctx, "Source") then
         local lib = X.find_project(a.projfn)
         local none = (not a.projfn or a.projfn == "")
-        local plabel = none and X.project_label(PROJ) or ((a.projfn:match("([^/\\]+)$") or a.projfn)..(lib and "" or " (non ouvert)"))
-        if reaper.ImGui_BeginCombo(ctx, "Projet source##projsrc", plabel) then
+        local plabel = none and X.project_label(PROJ) or ((a.projfn:match("([^/\\]+)$") or a.projfn)..(lib and "" or X.T(" (non ouvert)")))
+        if reaper.ImGui_BeginCombo(ctx, X.T("Projet source##projsrc"), plabel) then
           if reaper.ImGui_Selectable(ctx, X.project_label(PROJ).."##proj0", none) then
             a.projfn, a.region = nil, nil; X.save()
           end
@@ -6387,9 +6820,9 @@ function X.draw_editor(a, i)
           reaper.ImGui_EndCombo(ctx)
         end
         local regs = lib and X.get_regions(lib) or {}
-        local preview = "(choisir)"
+        local preview = X.T("(choisir)")
         for _, r in ipairs(regs) do if r.idx == a.region then preview = r.name end end
-        if reaper.ImGui_BeginCombo(ctx, "Région##regcombo", preview) then
+        if reaper.ImGui_BeginCombo(ctx, X.T("Région##regcombo"), preview) then
           for _, r in ipairs(regs) do
             if reaper.ImGui_Selectable(ctx, r.name.."##r"..r.idx, r.idx == a.region) then
               a.region = r.idx; X.save()
@@ -6400,31 +6833,31 @@ function X.draw_editor(a, i)
 
         local inplace = a.projfn and a.projfn ~= "" and not a.copy
         if a.projfn and a.projfn ~= "" then
-          local cc, cv = reaper.ImGui_Checkbox(ctx, "Copier les items dans ce projet##copy", a.copy or false)
+          local cc, cv = reaper.ImGui_Checkbox(ctx, X.T("Copier les items dans ce projet##copy"), a.copy or false)
           if cc then a.copy = cv; X.save() end
         end
 
         local c, g = false, a.track
         if inplace then
-          reaper.ImGui_TextDisabled(ctx, "La région joue dans son propre onglet (transport + FX du projet source).")
+          reaper.ImGui_TextDisabled(ctx, X.T("La région joue dans son propre onglet (transport + FX du projet source)."))
         else
-          c, g = X.track_combo("Piste cible", a.track, true)
+          c, g = X.track_combo(X.T("Piste cible"), a.track, true)
         end
         if c then a.track = g; X.save() end
 
         local c4, fi = reaper.ImGui_InputDouble(ctx, "Fade in (s)", a.fadein or 0)
         if c4 then a.fadein = math.max(0, fi); X.save() end
         reaper.ImGui_SetNextItemWidth(ctx, X.S(220))
-        local cfc, fc = reaper.ImGui_SliderDouble(ctx, "Courbe du fade##reg_curve", tonumber(a.fade_curve) or 0, 0, 1, "Léger  %.2f  Prononcé")
+        local cfc, fc = reaper.ImGui_SliderDouble(ctx, X.T("Courbe du fade##reg_curve"), tonumber(a.fade_curve) or 0, 0, 1, X.T("Léger  %.2f  Prononcé"))
         if cfc then a.fade_curve = math.max(0, math.min(1, fc)); X.save() end
-        reaper.ImGui_TextDisabled(ctx, "0 = linéaire ; augmentez le curseur pour accentuer la courbe des fades de cette cue.")
+        reaper.ImGui_TextDisabled(ctx, X.T("0 = linéaire ; augmentez le curseur pour accentuer la courbe des fades de cette cue."))
 
         reaper.ImGui_Separator(ctx)
-        local cloop, loopv = reaper.ImGui_Checkbox(ctx, "Boucle (région entière)##reg_loop", a.loop == true)
+        local cloop, loopv = reaper.ImGui_Checkbox(ctx, X.T("Boucle (région entière)##reg_loop"), a.loop == true)
         if cloop then a.loop = loopv; X.save() end
         if a.loop then
           reaper.ImGui_SameLine(ctx)
-          reaper.ImGui_Text(ctx, "Cycles :")
+          reaper.ImGui_Text(ctx, X.T("Cycles :"))
           reaper.ImGui_SameLine(ctx)
           if reaper.ImGui_SmallButton(ctx, "−##reg_cycle_minus") then
             local n = tonumber(a.loop_count) or 0
@@ -6439,23 +6872,23 @@ function X.draw_editor(a, i)
             X.save()
           end
         end
-        reaper.ImGui_TextDisabled(ctx, "Boucle : revient au début de la région à la fin. DEVAMP = terminer le cycle en cours puis s'arrêter.")
+        reaper.ImGui_TextDisabled(ctx, X.T("Boucle : revient au début de la région à la fin. DEVAMP = terminer le cycle en cours puis s'arrêter."))
 
         reaper.ImGui_Separator(ctx)
-        local ca, auto_value = reaper.ImGui_Checkbox(ctx, "AUTO : délai depuis le déclenchement", a.auto == true)
+        local ca, auto_value = reaper.ImGui_Checkbox(ctx, X.T("AUTO : délai depuis le déclenchement"), a.auto == true)
         if ca then a.auto = auto_value; if auto_value then a.follow = false end; X.save() end
-        local cf, follow_value = reaper.ImGui_Checkbox(ctx, "FOLLOW : attendre la fin puis le délai", a.follow == true)
+        local cf, follow_value = reaper.ImGui_Checkbox(ctx, X.T("FOLLOW : attendre la fin puis le délai"), a.follow == true)
         if cf then a.follow = follow_value; if follow_value then a.auto = false end; X.save() end
         reaper.ImGui_SetNextItemWidth(ctx, X.S(110))
         local cd, delay_value = reaper.ImGui_InputDouble(ctx, "DELAY (s)##reg_delay", tonumber(a.delay) or 0, 0, 0, "%.2f")
         if cd then a.delay = math.max(0, delay_value); X.save() end
-        reaper.ImGui_TextDisabled(ctx, "AUTO et FOLLOW sont exclusifs. DELAY s'applique au mode choisi.")
+        reaper.ImGui_TextDisabled(ctx, X.T("AUTO et FOLLOW sont exclusifs. DELAY s'applique au mode choisi."))
 
         reaper.ImGui_EndTabItem(ctx)
       end
 
-      if reaper.ImGui_BeginTabItem(ctx, "Snapshot lié") then
-        X.draw_linked_snapshot_tab(a, "Lier le temps du snapshot au fade in")
+      if reaper.ImGui_BeginTabItem(ctx, X.T("Snapshot lié")) then
+        X.draw_linked_snapshot_tab(a, X.T("Lier le temps du snapshot au fade in"))
         reaper.ImGui_EndTabItem(ctx)
       end
       reaper.ImGui_EndTabBar(ctx)
@@ -6463,41 +6896,41 @@ function X.draw_editor(a, i)
 
   elseif a.type == "stop" or a.type == "pause" or a.type == "devamp" then
     if reaper.ImGui_BeginTabBar(ctx, "acttabs_" .. a.type) then
-      if reaper.ImGui_BeginTabItem(ctx, "Réglages") then
+      if reaper.ImGui_BeginTabItem(ctx, X.T("Réglages")) then
         if a.type == "stop" then
-          local c2, d = reaper.ImGui_InputDouble(ctx, "Durée du fade (s)", a.dur or 0)
+          local c2, d = reaper.ImGui_InputDouble(ctx, X.T("Durée du fade (s)"), a.dur or 0)
           if c2 then a.dur = math.max(0, d); X.save() end
-          reaper.ImGui_TextDisabled(ctx, "0 = arrêt immédiat (affiché STOP) ; > 0 = FADEOUT.")
+          reaper.ImGui_TextDisabled(ctx, X.T("0 = arrêt immédiat (affiché STOP) ; > 0 = FADEOUT."))
         elseif a.type == "pause" then
-          local cu, un = reaper.ImGui_Checkbox(ctx, "Unpause (reprendre les cues en pause)##unpause", a.unpause == true)
+          local cu, un = reaper.ImGui_Checkbox(ctx, X.T("Unpause (reprendre les cues en pause)##unpause"), a.unpause == true)
           if cu then a.unpause = un; X.save() end
-          local lbl = a.unpause == true and "Fade in après unpause (s)" or "Fade out avant pause (s)"
+          local lbl = a.unpause == true and X.T("Fade in après unpause (s)") or X.T("Fade out avant pause (s)")
           local c2, d = reaper.ImGui_InputDouble(ctx, lbl .. "##pausedur", a.dur or 0)
           if c2 then a.dur = math.max(0, d); X.save() end
           if a.unpause ~= true and (a.dur or 0) > PAUSE_FADE_MAX then
-            reaper.ImGui_TextColored(ctx, 0xF39C12FF, string.format("Fade out limité à %.0f s (planification à l'avance).", PAUSE_FADE_MAX))
+            reaper.ImGui_TextColored(ctx, 0xF39C12FF, string.format(X.T("Fade out limité à %.0f s (planification à l'avance)."), PAUSE_FADE_MAX))
           end
         else
-          reaper.ImGui_TextDisabled(ctx, "Arme le Devamp sur les cues ciblées : elles finissent leur passage jusqu'à Lo puis filent vers OUT.")
+          reaper.ImGui_TextDisabled(ctx, X.T("Arme le Devamp sur les cues ciblées : elles finissent leur passage jusqu'à Lo puis filent vers OUT."))
         end
         X.draw_targets_editor(a, a.type)
         reaper.ImGui_EndTabItem(ctx)
       end
-      if reaper.ImGui_BeginTabItem(ctx, "Snapshot lié") then
-        X.draw_linked_snapshot_tab(a, a.type == "stop" and "Lier le temps du snapshot à la durée du fade"
-          or (a.type == "pause" and "Lier le temps du snapshot au fade" or nil))
+      if reaper.ImGui_BeginTabItem(ctx, X.T("Snapshot lié")) then
+        X.draw_linked_snapshot_tab(a, a.type == "stop" and X.T("Lier le temps du snapshot à la durée du fade")
+          or (a.type == "pause" and X.T("Lier le temps du snapshot au fade") or nil))
         reaper.ImGui_EndTabItem(ctx)
       end
       reaper.ImGui_EndTabBar(ctx)
     end
 
   elseif a.type == "preset" then
-    reaper.ImGui_TextDisabled(ctx, "Rappelle un preset de réglages de lecture sur les cues AUDIO ciblées qui jouent en ce moment.")
+    reaper.ImGui_TextDisabled(ctx, X.T("Rappelle un preset de réglages de lecture sur les cues AUDIO ciblées qui jouent en ce moment."))
     reaper.ImGui_SetNextItemWidth(ctx, X.S(110))
-    local cpi, pv = reaper.ImGui_InputInt(ctx, "N° du preset à rappeler##preset_id", tonumber(a.preset_id) or 0)
+    local cpi, pv = reaper.ImGui_InputInt(ctx, X.T("N° du preset à rappeler##preset_id"), tonumber(a.preset_id) or 0)
     if cpi then a.preset_id = math.max(0, pv); X.save() end
     reaper.ImGui_SetNextItemWidth(ctx, X.S(110))
-    local cdu, dv = reaper.ImGui_InputDouble(ctx, "Temps de transition (s)##preset_dur", tonumber(a.dur) or 0, 0, 0, "%.2f")
+    local cdu, dv = reaper.ImGui_InputDouble(ctx, X.T("Temps de transition (s)##preset_dur"), tonumber(a.dur) or 0, 0, 0, "%.2f")
     if cdu then a.dur = math.max(0, dv); X.save() end
     reaper.ImGui_Separator(ctx)
     X.draw_targets_editor(a, "preset")
@@ -6510,21 +6943,21 @@ function X.draw_editor(a, i)
           X.ensure_presets(cue)
           local q = X.preset_by_id(cue, a.preset_id)
           if q then
-            reaper.ImGui_TextDisabled(ctx, string.format("Q%s — %s : preset %d « %s »", tostring(tid), cue.name or "", q.id, q.name))
+            reaper.ImGui_TextDisabled(ctx, string.format(X.T("Q%s — %s : preset %d « %s »"), tostring(tid), cue.name or "", q.id, q.name))
           else
-            reaper.ImGui_TextColored(ctx, 0xF39C12FF, string.format("Q%s — %s : le preset %d n'existe pas pour cette cue.", tostring(tid), cue.name or "", tonumber(a.preset_id) or 0))
+            reaper.ImGui_TextColored(ctx, 0xF39C12FF, string.format(X.T("Q%s — %s : le preset %d n'existe pas pour cette cue."), tostring(tid), cue.name or "", tonumber(a.preset_id) or 0))
           end
         else
-          reaper.ImGui_TextColored(ctx, 0xF39C12FF, string.format("Q%s : cible ignorée (seules les cues AUDIO ont des presets).", tostring(tid)))
+          reaper.ImGui_TextColored(ctx, 0xF39C12FF, string.format(X.T("Q%s : cible ignorée (seules les cues AUDIO ont des presets)."), tostring(tid)))
         end
       end
     else
-      reaper.ImGui_TextDisabled(ctx, "Sans cible : toutes les cues AUDIO en cours de lecture.")
+      reaper.ImGui_TextDisabled(ctx, X.T("Sans cible : toutes les cues AUDIO en cours de lecture."))
     end
 
   elseif a.type == "osc" then
-    local preview = (a.port_name and a.port_name ~= "") and a.port_name or "(choisir un port)"
-    if reaper.ImGui_BeginCombo(ctx, "Port OSC##oscport", preview) then
+    local preview = (a.port_name and a.port_name ~= "") and a.port_name or X.T("(choisir un port)")
+    if reaper.ImGui_BeginCombo(ctx, X.T("Port OSC##oscport"), preview) then
       for _, p in ipairs(prefs.ports or {}) do
         if reaper.ImGui_Selectable(ctx, p.name.."##p"..p.name, a.port_name == p.name) then
           a.port_name = p.name; X.save()
@@ -6532,9 +6965,9 @@ function X.draw_editor(a, i)
       end
       reaper.ImGui_EndCombo(ctx)
     end
-    local c, addr = reaper.ImGui_InputText(ctx, "Adresse##oscaddr", a.address or "/")
+    local c, addr = reaper.ImGui_InputText(ctx, X.T("Adresse##oscaddr"), a.address or "/")
     if c then a.address = addr; X.save() end
-    reaper.ImGui_TextDisabled(ctx, "Arguments (séparés par des espaces) :")
+    reaper.ImGui_TextDisabled(ctx, X.T("Arguments (séparés par des espaces) :"))
     local argstr = table.concat(a.args or {}, " ")
     local c2, newargs = reaper.ImGui_InputText(ctx, "##oscargs", argstr)
     if c2 then
@@ -6546,11 +6979,11 @@ function X.draw_editor(a, i)
       X.save()
     end
     if not has_socket then
-      reaper.ImGui_TextColored(ctx, 0xF39C12FF, "LuaSocket manquant → l'envoi OSC est désactivé.")
+      reaper.ImGui_TextColored(ctx, 0xF39C12FF, X.T("LuaSocket manquant → l'envoi OSC est désactivé."))
     end
 
   elseif a.type == "midi" then
-    local c, g = X.track_combo("Piste cible##miditr", a.track, false)
+    local c, g = X.track_combo(X.T("Piste cible##miditr"), a.track, false)
     if c then a.track = g; X.save() end
     local types = {"note", "cc", "pc"}
     local labels = {note="Note", cc="Control Change", pc="Program Change"}
@@ -6562,7 +6995,7 @@ function X.draw_editor(a, i)
       end
       reaper.ImGui_EndCombo(ctx)
     end
-    local cch, chv = reaper.ImGui_InputInt(ctx, "Canal (1-16)##midich", a.channel or 1)
+    local cch, chv = reaper.ImGui_InputInt(ctx, X.T("Canal (1-16)##midich"), a.channel or 1)
     if cch then a.channel = math.max(1, math.min(16, chv)); X.save() end
     if a.midi_type == "note" then
       local cn, nv = reaper.ImGui_InputInt(ctx, "Note (0-127)##midinote", a.note or 60)
@@ -6572,7 +7005,7 @@ function X.draw_editor(a, i)
     elseif a.midi_type == "cc" then
       local cc, cv = reaper.ImGui_InputInt(ctx, "CC (0-127)##midicc", a.cc or 1)
       if cc then a.cc = math.max(0, math.min(127, cv)); X.save() end
-      local cv2, vv = reaper.ImGui_InputInt(ctx, "Valeur##midival", a.value or 0)
+      local cv2, vv = reaper.ImGui_InputInt(ctx, X.T("Valeur##midival"), a.value or 0)
       if cv2 then a.value = math.max(0, math.min(127, vv)); X.save() end
     else
       local cp, pv = reaper.ImGui_InputInt(ctx, "Program (0-127)##midiprog", a.program or 0)
@@ -6584,8 +7017,8 @@ function X.draw_editor(a, i)
     local lib = X.find_project(a.projfn)
     local none = (not a.projfn or a.projfn == "")
     local plabel = none and X.project_label(PROJ)
-      or ((a.projfn:match("([^/\\]+)$") or a.projfn)..(lib and "" or " (non ouvert)"))
-    if reaper.ImGui_BeginCombo(ctx, "Projet source##snap_projsrc", plabel) then
+      or ((a.projfn:match("([^/\\]+)$") or a.projfn)..(lib and "" or X.T(" (non ouvert)")))
+    if reaper.ImGui_BeginCombo(ctx, X.T("Projet source##snap_projsrc"), plabel) then
       if reaper.ImGui_Selectable(ctx, X.project_label(PROJ).."##pproj0", none) then
         a.projfn = nil; X.save()
       end
@@ -6602,18 +7035,44 @@ function X.draw_editor(a, i)
   end
 
   reaper.ImGui_Spacing(ctx)
-  reaper.ImGui_TextDisabled(ctx, "Supprimer : Ctrl/Cmd + clic sur le N° de la ligne.")
+  reaper.ImGui_TextDisabled(ctx, X.T("Supprimer : Ctrl/Cmd + clic sur le N° de la ligne."))
 end
 
 ---------------------------------------------------------------- Préférences
+-- Changement de langue (défini ici pour voir les locales `tabs` et `status`).
+function X.set_lang(code)
+  if code ~= "fr" and code ~= "en" then return end
+  X.lang = code
+  X.T_cache = {}
+  reaper.SetExtState(EXT, "lang", code, true)
+  -- Les noms de presets automatiques (ex. « Défaut ») suivent la nouvelle langue.
+  for _, tab in ipairs(tabs or {}) do
+    for _, act in ipairs(tab.actions or {}) do
+      if act.type == "audio" and X.ensure_presets then pcall(X.ensure_presets, act) end
+    end
+  end
+  status = code == "fr" and "Langue : Français." or "Language: English."
+end
+
 function X.draw_prefs()
-  if reaper.ImGui_CollapsingHeader(ctx, "Préférences générales") then
-    local c1, v1 = reaper.ImGui_Checkbox(ctx, "Arrêter la lecture quand plus aucun média n'est joué", prefs.auto_stop == true)
+  if reaper.ImGui_CollapsingHeader(ctx, X.T("Préférences générales") .. "###prefs_general") then
+    -- Langue de l'interface : English (défaut) ou Français. Choix conservé entre les sessions.
+    reaper.ImGui_SetNextItemWidth(ctx, X.S(160))
+    if reaper.ImGui_BeginCombo(ctx, X.T("Langue") .. "##ui_language", X.LANG_NAMES[X.lang]) then
+      for _, code in ipairs({"en", "fr"}) do
+        if reaper.ImGui_Selectable(ctx, X.LANG_NAMES[code] .. "##lang_" .. code, X.lang == code) and X.lang ~= code then
+          X.set_lang(code)
+        end
+      end
+      reaper.ImGui_EndCombo(ctx)
+    end
+    reaper.ImGui_Separator(ctx)
+    local c1, v1 = reaper.ImGui_Checkbox(ctx, X.T("Arrêter la lecture quand plus aucun média n'est joué"), prefs.auto_stop == true)
     if c1 then
       prefs.auto_stop = v1 and true or false
       cue_session, idle_since = false, nil
       X.save()
-      status = prefs.auto_stop and "Auto-stop transport : ACTIVÉ" or "Auto-stop transport : DÉSACTIVÉ"
+      status = prefs.auto_stop and X.T("Auto-stop transport : ACTIVÉ") or X.T("Auto-stop transport : DÉSACTIVÉ")
     end
     local c2, v2 = reaper.ImGui_Checkbox(ctx, "Delete on stop", prefs.delete_on_stop == true)
     if c2 then
@@ -6625,30 +7084,30 @@ function X.draw_prefs()
       X.save()
     end
     reaper.ImGui_SetNextItemWidth(ctx, X.S(220))
-    local ccurve, curve = reaper.ImGui_SliderDouble(ctx, "Courbe du STOP global##stop_curve", stop_curve, 0, 1, "Logarithmique  %.2f  Exponentiel")
+    local ccurve, curve = reaper.ImGui_SliderDouble(ctx, X.T("Courbe du STOP global##stop_curve"), stop_curve, 0, 1, X.T("Logarithmique  %.2f  Exponentiel"))
     if ccurve then
       stop_curve = math.max(0, math.min(1, curve))
       reaper.SetExtState(EXT, "stopcurve", tostring(stop_curve), true)
     end
-    reaper.ImGui_TextDisabled(ctx, "À gauche : baisse rapide du niveau. Au centre : linéaire. À droite : niveau maintenu puis chute en fin de fade. La durée reste inchangée.")
-    local c8, v8 = reaper.ImGui_Checkbox(ctx, "Une nouvelle cue remplace celle qui joue déjà sur la même piste", prefs.exclusive_track ~= false)
+    reaper.ImGui_TextDisabled(ctx, X.T("À gauche : baisse rapide du niveau. Au centre : linéaire. À droite : niveau maintenu puis chute en fin de fade. La durée reste inchangée."))
+    local c8, v8 = reaper.ImGui_Checkbox(ctx, X.T("Une nouvelle cue remplace celle qui joue déjà sur la même piste"), prefs.exclusive_track ~= false)
     if c8 then prefs.exclusive_track = v8; X.save() end
 
     reaper.ImGui_SetNextItemWidth(ctx, X.S(110))
-    local ch, v = reaper.ImGui_InputInt(ctx, "Marge (ms)", margin)
+    local ch, v = reaper.ImGui_InputInt(ctx, X.T("Marge (ms)"), margin)
     if ch then
       margin = math.max(0, math.min(2000, v))
       reaper.SetExtState(EXT, "margin", tostring(margin), true)
     end
 
     reaper.ImGui_Separator(ctx)
-    reaper.ImGui_Text(ctx, "Ports OSC (illimités)")
+    reaper.ImGui_Text(ctx, X.T("Ports OSC (illimités)"))
     reaper.ImGui_Spacing(ctx)
     prefs.ports = prefs.ports or {}
     local to_remove = nil
     for i, p in ipairs(prefs.ports) do
       reaper.ImGui_PushID(ctx, "port"..i)
-      reaper.ImGui_Text(ctx, "Nom")
+      reaper.ImGui_Text(ctx, X.T("Nom"))
       reaper.ImGui_SameLine(ctx, X.S(80))
       reaper.ImGui_SetNextItemWidth(ctx, X.S(180))
       local cn, nn = reaper.ImGui_InputText(ctx, "##name", p.name or "")
@@ -6664,7 +7123,7 @@ function X.draw_prefs()
       local cp, np = reaper.ImGui_InputInt(ctx, "##port", p.port or 8000, 0, 0)
       if cp then p.port = math.max(1, math.min(65535, np)); X.save() end
       reaper.ImGui_SameLine(ctx)
-      if reaper.ImGui_Button(ctx, "Supprimer") then
+      if reaper.ImGui_Button(ctx, X.T("Supprimer")) then
         to_remove = i
       end
       reaper.ImGui_Spacing(ctx)
@@ -6675,7 +7134,7 @@ function X.draw_prefs()
       table.remove(prefs.ports, to_remove)
       X.save()
     end
-    if reaper.ImGui_Button(ctx, "+ Ajouter un port OSC") then
+    if reaper.ImGui_Button(ctx, X.T("+ Ajouter un port OSC")) then
       prefs.ports[#prefs.ports+1] = {
         name = "Port " .. (#prefs.ports + 1),
         ip = "127.0.0.1",
@@ -6684,26 +7143,26 @@ function X.draw_prefs()
       X.save()
     end
     if not has_socket then
-      reaper.ImGui_TextColored(ctx, 0xF39C12FF, "Mavriq Lua Sockets 1.2 non détecté → l'envoi OSC est désactivé.")
-      reaper.ImGui_TextDisabled(ctx, "Vérifie dans ReaPack que Mavriq Lua Sockets est installé en version 1.2.")
+      reaper.ImGui_TextColored(ctx, 0xF39C12FF, X.T("Mavriq Lua Sockets 1.2 non détecté → l'envoi OSC est désactivé."))
+      reaper.ImGui_TextDisabled(ctx, X.T("Vérifie dans ReaPack que Mavriq Lua Sockets est installé en version 1.2."))
     end
     reaper.ImGui_Separator(ctx)
-    reaper.ImGui_Text(ctx, "Apparence de l’interface")
+    reaper.ImGui_Text(ctx, X.T("Apparence de l’interface"))
     reaper.ImGui_SameLine(ctx)
     -- Petit carré discret dans les préférences générales : ouvre tous les réglages d’apparence.
     local swatch = X.interface_bg_color() or tonumber(prefs.bg_hue) or 0x3B82F6FF
     if reaper.ImGui_ColorButton then
       if reaper.ImGui_ColorButton(ctx, "##interface_appearance_prefs", swatch, 0, X.S(16), X.S(16)) then
-        reaper.ImGui_OpenPopup(ctx, "Apparence de l’interface##appearance_popup")
+        reaper.ImGui_OpenPopup(ctx, X.T("Apparence de l’interface##appearance_popup"))
       end
     elseif reaper.ImGui_Button(ctx, "■##interface_appearance_prefs", X.S(16), X.S(16)) then
-      reaper.ImGui_OpenPopup(ctx, "Apparence de l’interface##appearance_popup")
+      reaper.ImGui_OpenPopup(ctx, X.T("Apparence de l’interface##appearance_popup"))
     end
     if reaper.ImGui_IsItemHovered and reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
-      reaper.ImGui_SetTooltip(ctx, "Réglages de couleur, de fond et de zoom")
+      reaper.ImGui_SetTooltip(ctx, X.T("Réglages de couleur, de fond et de zoom"))
     end
-    if reaper.ImGui_BeginPopup(ctx, "Apparence de l’interface##appearance_popup") then
-      reaper.ImGui_Text(ctx, "Apparence de l’interface")
+    if reaper.ImGui_BeginPopup(ctx, X.T("Apparence de l’interface##appearance_popup")) then
+      reaper.ImGui_Text(ctx, X.T("Apparence de l’interface"))
       reaper.ImGui_Separator(ctx)
       if reaper.ImGui_ColorPicker3 then
         local flags = 0
@@ -6716,14 +7175,14 @@ function X.draw_prefs()
         if changed then prefs.bg_hue = color; X.save() end
       end
       reaper.ImGui_SetNextItemWidth(ctx, X.S(230))
-      local cbg, bgv = reaper.ImGui_SliderDouble(ctx, "Fond : noir → blanc##bg_level", tonumber(prefs.bg_level) or 0, 0, 1, "%.2f")
+      local cbg, bgv = reaper.ImGui_SliderDouble(ctx, X.T("Fond : noir → blanc##bg_level"), tonumber(prefs.bg_level) or 0, 0, 1, "%.2f")
       if cbg then prefs.bg_level = bgv; X.save() end
       reaper.ImGui_SetNextItemWidth(ctx, X.S(230))
       local csat, sat = reaper.ImGui_SliderDouble(ctx, "Saturation##bg_saturation", tonumber(prefs.bg_saturation) or 0, 0, 1, "%.2f")
       if csat then prefs.bg_saturation = sat; X.save() end
       reaper.ImGui_Separator(ctx)
       reaper.ImGui_SetNextItemWidth(ctx, X.S(230))
-      local cz, zv = reaper.ImGui_SliderDouble(ctx, "Zoom interface##zoom", ui_scale, 0.6, 2.5, "%.2f×")
+      local cz, zv = reaper.ImGui_SliderDouble(ctx, X.T("Zoom interface##zoom"), ui_scale, 0.6, 2.5, "%.2f×")
       if cz then X.set_zoom(zv) end
       reaper.ImGui_SameLine(ctx)
       if reaper.ImGui_SmallButton(ctx, "100%##zoomreset_popup") then X.set_zoom(1.0) end
@@ -6735,16 +7194,16 @@ function X.draw_prefs()
     local accent_swatch = X.accent_color()
     if reaper.ImGui_ColorButton then
       if reaper.ImGui_ColorButton(ctx, "##interface_accent_prefs", accent_swatch, 0, X.S(16), X.S(16)) then
-        reaper.ImGui_OpenPopup(ctx, "Couleur des objets bleus##accent_popup")
+        reaper.ImGui_OpenPopup(ctx, X.T("Couleur des objets bleus##accent_popup"))
       end
     elseif reaper.ImGui_Button(ctx, "■##interface_accent_prefs", X.S(16), X.S(16)) then
-      reaper.ImGui_OpenPopup(ctx, "Couleur des objets bleus##accent_popup")
+      reaper.ImGui_OpenPopup(ctx, X.T("Couleur des objets bleus##accent_popup"))
     end
     if reaper.ImGui_IsItemHovered and reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
-      reaper.ImGui_SetTooltip(ctx, "Couleur des objets bleus de l’interface")
+      reaper.ImGui_SetTooltip(ctx, X.T("Couleur des objets bleus de l’interface"))
     end
-    if reaper.ImGui_BeginPopup(ctx, "Couleur des objets bleus##accent_popup") then
-      reaper.ImGui_Text(ctx, "Couleur des objets bleus")
+    if reaper.ImGui_BeginPopup(ctx, X.T("Couleur des objets bleus##accent_popup")) then
+      reaper.ImGui_Text(ctx, X.T("Couleur des objets bleus"))
       reaper.ImGui_Separator(ctx)
       if reaper.ImGui_ColorPicker3 then
         local flags = 0
@@ -6769,16 +7228,16 @@ function X.draw_prefs()
     else
       reaper.ImGui_SameLine(ctx)
     end
-    if reaper.ImGui_Button(ctx, "☕ Soutenir ReaLive##support_bmac") then
+    if reaper.ImGui_Button(ctx, X.T("☕ Soutenir ReaLive##support_bmac")) then
       local url = "https://buymeacoffee.com/joffo"
       if reaper.CF_ShellExecute then
         reaper.CF_ShellExecute(url)
       else
-        reaper.MB("Pour soutenir ReaLive, ouvre cette adresse dans ton navigateur :\n" .. url, "Soutenir ReaLive", 0)
+        reaper.MB(X.T("Pour soutenir ReaLive, ouvre cette adresse dans ton navigateur :\n") .. url, X.T("Soutenir ReaLive"), 0)
       end
     end
     if reaper.ImGui_IsItemHovered and reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
-      reaper.ImGui_SetTooltip(ctx, "Ouvrir la page Buy Me a Coffee de ReaLive")
+      reaper.ImGui_SetTooltip(ctx, X.T("Ouvrir la page Buy Me a Coffee de ReaLive"))
     end
   end
 end
@@ -6845,17 +7304,17 @@ function X.draw()
   -- Barre d'onglets : les carrés sont réordonnables par glisser-déposer.
   for i, tab in ipairs(tabs) do
     if i > 1 then reaper.ImGui_SameLine(ctx) end
-    local label = (i == active_tab and "[ " or "") .. (tab.name or ("Liste "..i)) .. (i == active_tab and " ]" or "") .. "##cue_list_tab_"..i
+    local label = (i == active_tab and "[ " or "") .. X.dn(tab.name or (X.T("Liste ")..i)) .. (i == active_tab and " ]" or "") .. "##cue_list_tab_"..i
     if reaper.ImGui_Button(ctx, label) and i ~= active_tab then
       if tabs[active_tab] then tabs[active_tab].actions = actions end
       active_tab = i; X.sync_active_tab()
       pick_anchor = nil
-      status = "Liste active : " .. (tabs[i].name or ("Liste "..i))
+      status = X.T("Liste active : ") .. X.dn(tabs[i].name or (X.T("Liste ")..i))
     end
     -- Source : envoyer l'index de l'onglet déplacé.
     if reaper.ImGui_BeginDragDropSource and reaper.ImGui_SetDragDropPayload and reaper.ImGui_EndDragDropSource and reaper.ImGui_BeginDragDropSource(ctx) then
       reaper.ImGui_SetDragDropPayload(ctx, "CUE_LIST_TAB", tostring(i))
-      reaper.ImGui_Text(ctx, tab.name or ("Liste "..i))
+      reaper.ImGui_Text(ctx, X.dn(tab.name or (X.T("Liste ")..i)))
       reaper.ImGui_EndDragDropSource(ctx)
     end
     -- Cible : déplacer l'onglet lâché à cette position.
@@ -6871,7 +7330,7 @@ function X.draw()
           if active_tab == from then active_tab = dest
           elseif from < active_tab and dest >= active_tab then active_tab = active_tab - 1
           elseif from > active_tab and dest <= active_tab then active_tab = active_tab + 1 end
-          X.sync_active_tab(); X.save(); status = "Onglets réorganisés."
+          X.sync_active_tab(); X.save(); status = X.T("Onglets réorganisés.")
         end
       end
       reaper.ImGui_EndDragDropTarget(ctx)
@@ -6882,53 +7341,53 @@ function X.draw()
     tabs[#tabs+1] = {name = X.new_tab_name(), actions = {}}
     active_tab = #tabs; X.sync_active_tab()
     pick_anchor = nil
-    X.save(); status = "Nouvel onglet créé."
+    X.save(); status = X.T("Nouvel onglet créé.")
   end
   reaper.ImGui_SameLine(ctx)
   if reaper.ImGui_Button(ctx, "-##delete_cue_list_tab") then
-    if #tabs <= 1 then status = "Il faut conserver au moins un onglet."
+    if #tabs <= 1 then status = X.T("Il faut conserver au moins un onglet.")
     else pending_delete_tab = active_tab end
   end
   reaper.ImGui_SameLine(ctx)
-  if reaper.ImGui_Button(ctx, "Renommer##cue_list_tab") then
-    tab_name_edit = active_tab; tab_name_buffer = tabs[active_tab].name or ("Liste "..active_tab)
+  if reaper.ImGui_Button(ctx, X.T("Renommer##cue_list_tab")) then
+    tab_name_edit = active_tab; tab_name_buffer = X.dn(tabs[active_tab].name or (X.T("Liste ")..active_tab))
   end
   reaper.ImGui_SameLine(ctx)
-  if reaper.ImGui_Button(ctx, "Vider liste##clear_active_list") then
-    if reaper.MB("Vider uniquement la liste active « " .. tostring(tabs[active_tab].name or "Liste") .. " » ?", "ActionList — Vider liste", 4) == 6 then
+  if reaper.ImGui_Button(ctx, X.T("Vider liste##clear_active_list")) then
+    if reaper.MB(X.T("Vider uniquement la liste active « ") .. tostring(X.dn(tabs[active_tab].name or X.T("Liste"))) .. X.T(" » ?"), X.T("ActionList — Vider liste"), 4) == 6 then
       tabs[active_tab].actions = {}
       X.sync_active_tab()
       picked, pick_anchor, selected = {}, nil, nil
       X.save()
-      status = "Liste active vidée. Les autres onglets sont conservés."
+      status = X.T("Liste active vidée. Les autres onglets sont conservés.")
     end
   end
   if tab_name_edit then
     reaper.ImGui_SameLine(ctx)
     reaper.ImGui_SetNextItemWidth(ctx, X.S(130))
-    local changed, value = reaper.ImGui_InputText(ctx, "Nom##cue_list_tab_name", tab_name_buffer)
+    local changed, value = reaper.ImGui_InputText(ctx, X.T("Nom##cue_list_tab_name"), tab_name_buffer)
     if changed then tab_name_buffer = value end
     reaper.ImGui_SameLine(ctx)
     if reaper.ImGui_Button(ctx, "OK##cue_list_tab_name") then
       local name = (tab_name_buffer or ""):match("^%s*(.-)%s*$")
-      if name ~= "" then tabs[tab_name_edit].name = name; X.save(); status = "Onglet renommé." end
+      if name ~= "" then tabs[tab_name_edit].name = name; X.save(); status = X.T("Onglet renommé.") end
       tab_name_edit = nil
     end
     reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_Button(ctx, "Annuler##cue_list_tab_name") then tab_name_edit = nil end
+    if reaper.ImGui_Button(ctx, X.T("Annuler##cue_list_tab_name")) then tab_name_edit = nil end
   end
   if pending_delete_tab then
     reaper.ImGui_SameLine(ctx)
-    reaper.ImGui_Text(ctx, "Confirmer suppression de « "..(tabs[pending_delete_tab].name or "Liste").." » ?")
+    reaper.ImGui_Text(ctx, X.T("Confirmer suppression de « ")..X.dn(tabs[pending_delete_tab].name or X.T("Liste"))..X.T(" » ?"))
     reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_Button(ctx, "Oui##confirm_delete_tab") then
+    if reaper.ImGui_Button(ctx, X.T("Oui##confirm_delete_tab")) then
       table.remove(tabs, pending_delete_tab)
       active_tab = math.min(pending_delete_tab, #tabs); pending_delete_tab = nil
       X.sync_active_tab(); picked, pick_anchor, selected = {}, nil, nil
-      X.save(); status = "Onglet supprimé."
+      X.save(); status = X.T("Onglet supprimé.")
     end
     reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_Button(ctx, "Non##cancel_delete_tab") then pending_delete_tab = nil end
+    if reaper.ImGui_Button(ctx, X.T("Non##cancel_delete_tab")) then pending_delete_tab = nil end
   end
   reaper.ImGui_Separator(ctx)
 
@@ -7012,7 +7471,7 @@ function X.draw()
   if go_pressed then X.go_selected() end
   reaper.ImGui_SameLine(ctx)
   reaper.ImGui_BeginGroup(ctx)
-  reaper.ImGui_Text(ctx, "Prochaine : "..sel_name)
+  reaper.ImGui_Text(ctx, X.T("Prochaine : ")..sel_name)
   do
     -- Pause globale : met tout en pause sans rien effacer ; un nouvel appui relance.
     local paused_all = X.global_pause ~= nil
@@ -7032,7 +7491,7 @@ function X.draw()
       reaper.ImGui_DrawList_AddRectFilled(gdl, gcx + 2 * gu, gcy - 8 * gu, gcx + 7 * gu, gcy + 8 * gu, 0xF39C12FF)
     end
     if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
-      reaper.ImGui_SetTooltip(ctx, paused_all and "Reprendre tout là où c'était" or "Pause : arrête la timeline (retour en arrière possible), régions d'autres projets comprises")
+      reaper.ImGui_SetTooltip(ctx, paused_all and X.T("Reprendre tout là où c'était") or X.T("Pause : arrête la timeline (retour en arrière possible), régions d'autres projets comprises"))
     end
   end
   reaper.ImGui_EndGroup(ctx)
@@ -7056,18 +7515,18 @@ function X.draw()
   if reaper.ImGui_Button(ctx, "+ MIDI") then X.add_action("midi") end
 
   if reaper.ImGui_Button(ctx, "New") then
-    if reaper.MB("Créer une nouvelle session ?\nToutes les listes et tous leurs onglets seront vidés.", "ActionList — Nouvelle session", 4) == 6 then
+    if reaper.MB(X.T("Créer une nouvelle session ?\nToutes les listes et tous leurs onglets seront vidés."), X.T("ActionList — Nouvelle session"), 4) == 6 then
       for _, tab in ipairs(tabs) do tab.actions = {} end
       X.sync_active_tab()
       picked, pick_anchor, selected = {}, nil, nil
       cue_clipboard, clipboard_cut = nil, false
       X.save()
-      status = "Toutes les listes ont été vidées."
+      status = X.T("Toutes les listes ont été vidées.")
     end
   end
   reaper.ImGui_SameLine(ctx)
   if reaper.ImGui_Button(ctx, "Open") then
-    local ok, f = reaper.GetUserFileNameForRead("", "Ouvrir une ActionList", "*.lua;*.txt")
+    local ok, f = reaper.GetUserFileNameForRead("", X.T("Ouvrir une ActionList"), "*.lua;*.txt")
     if ok and f ~= "" then
       local file = io.open(f, "r")
       if file then
@@ -7080,12 +7539,12 @@ function X.draw()
             next_id  = d.next_id or 1
             if type(d.tabs) == "table" and #d.tabs > 0 then
               tabs = d.tabs
-              for _, tab in ipairs(tabs) do tab.name = tab.name or "Liste"; tab.actions = tab.actions or {} end
+              for _, tab in ipairs(tabs) do tab.name = tab.name or X.T("Liste"); tab.actions = tab.actions or {} end
               active_tab = d.active_tab or 1
               if type(d.actions) == "table" and tabs[active_tab] then tabs[active_tab].actions = d.actions end
               X.sync_active_tab()
             else
-              actions = d.actions or {}; tabs = {{name = "Liste 1", actions = actions}}; active_tab = 1; X.sync_active_tab()
+              actions = d.actions or {}; tabs = {{name = X.T("Liste 1"), actions = actions}}; active_tab = 1; X.sync_active_tab()
             end
             if type(d.prefs) == "table" then
               for k, pv in pairs(d.prefs) do prefs[k] = pv end
@@ -7094,15 +7553,15 @@ function X.draw()
             picked, pick_anchor, selected = {}, nil, nil
             local missing_media = X.resolve_loaded_media_paths(f)
             X.save()
-            if not missing_media or missing_media == 0 then status = "ActionList chargée : "..f end
+            if not missing_media or missing_media == 0 then status = X.T("ActionList chargée : ")..f end
           else
-            status = "Fichier invalide : "..f
+            status = X.T("Fichier invalide : ")..f
           end
         else
-          status = "Impossible d'analyser : "..f
+          status = X.T("Impossible d'analyser : ")..f
         end
       else
-        status = "Impossible d'ouvrir : "..f
+        status = X.T("Impossible d'ouvrir : ")..f
       end
     end
   end
@@ -7114,12 +7573,12 @@ function X.draw()
     local f = nil
     if reaper.JS_Dialog_BrowseForSaveFile then
       local ok, filename = reaper.JS_Dialog_BrowseForSaveFile(
-        prefs.save_bundle == true and "Enregistrer le Bundle ReaLive (nom du fichier Lua)" or "Enregistrer l'ActionList",
+        prefs.save_bundle == true and X.T("Enregistrer le Bundle ReaLive (nom du fichier Lua)") or X.T("Enregistrer l'ActionList"),
         "", "ActionList.lua", "*.lua")
       if ok and filename and filename ~= "" then f = filename end
     else
       local ok, filename = reaper.GetUserFileNameForRead(
-        "", prefs.save_bundle == true and "Enregistrer le Bundle ReaLive (taper le nom du fichier Lua)" or "Enregistrer l'ActionList (taper le nom et valider)", "*.lua")
+        "", prefs.save_bundle == true and X.T("Enregistrer le Bundle ReaLive (taper le nom du fichier Lua)") or X.T("Enregistrer l'ActionList (taper le nom et valider)"), "*.lua")
       if ok and filename and filename ~= "" then f = filename end
     end
     if f then
@@ -7138,9 +7597,9 @@ function X.draw()
         if file then
           file:write(X.ser({actions = actions, tabs = tabs, active_tab = active_tab, next_id = next_id, prefs = prefs}))
           file:close()
-          status = "ActionList enregistrée : "..f
+          status = X.T("ActionList enregistrée : ")..f
         else
-          status = "Impossible d'écrire : "..f
+          status = X.T("Impossible d'écrire : ")..f
         end
       end
     end
@@ -7155,7 +7614,7 @@ function X.draw()
   if reaper.ImGui_Button(ctx, "↷##redo", icon_size, icon_size) then X.redo_change() end
   reaper.ImGui_SameLine(ctx)
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Button(), 0xB22222FF)
-  if reaper.ImGui_Button(ctx, "STOP (Échap)") then auto_chain = nil; X.fire_stop({dur = stop_fade}) end
+  if reaper.ImGui_Button(ctx, X.T("STOP (Échap)")) then auto_chain = nil; X.fire_stop({dur = stop_fade}) end
   reaper.ImGui_PopStyleColor(ctx)
   reaper.ImGui_SameLine(ctx)
   reaper.ImGui_SetNextItemWidth(ctx, X.S(80))
@@ -7223,10 +7682,10 @@ function X.draw()
   if reaper.ImGui_BeginTable(ctx, "actions_table", 9, table_flags, 0, list_h) then
     reaper.ImGui_TableSetupScrollFreeze(ctx, 0, 1)
 
-    reaper.ImGui_TableSetupColumn(ctx, "N°", reaper.ImGui_TableColumnFlags_WidthFixed(), X.S(34))
-    reaper.ImGui_TableSetupColumn(ctx, "Titre", reaper.ImGui_TableColumnFlags_WidthStretch())
+    reaper.ImGui_TableSetupColumn(ctx, X.T("N°"), reaper.ImGui_TableColumnFlags_WidthFixed(), X.S(34))
+    reaper.ImGui_TableSetupColumn(ctx, X.T("Titre"), reaper.ImGui_TableColumnFlags_WidthStretch())
     reaper.ImGui_TableSetupColumn(ctx, "Type", reaper.ImGui_TableColumnFlags_WidthFixed(), X.S(78))
-    reaper.ImGui_TableSetupColumn(ctx, "Statut", reaper.ImGui_TableColumnFlags_WidthFixed(), X.S(104))
+    reaper.ImGui_TableSetupColumn(ctx, X.T("Statut"), reaper.ImGui_TableColumnFlags_WidthFixed(), X.S(104))
     reaper.ImGui_TableSetupColumn(ctx, "AUTO", reaper.ImGui_TableColumnFlags_WidthFixed(), X.S(48))
     reaper.ImGui_TableSetupColumn(ctx, "FOLLOW", reaper.ImGui_TableColumnFlags_WidthFixed(), X.S(58))
     reaper.ImGui_TableSetupColumn(ctx, "DELAY (s)", reaper.ImGui_TableColumnFlags_WidthFixed(), X.S(86))
@@ -7234,7 +7693,7 @@ function X.draw()
     reaper.ImGui_TableSetupColumn(ctx, "ID", reaper.ImGui_TableColumnFlags_WidthFixed(), X.S(54))
 
     reaper.ImGui_TableNextRow(ctx, reaper.ImGui_TableRowFlags_Headers())
-    for col, label in ipairs({"N°", "Titre", "Type", "Statut", "AUTO", "FOLLOW", "DELAY (s)", "Output", "ID"}) do
+    for col, label in ipairs({X.T("N°"), X.T("Titre"), "Type", X.T("Statut"), "AUTO", "FOLLOW", "DELAY (s)", "Output", "ID"}) do
       reaper.ImGui_TableSetColumnIndex(ctx, col - 1)
       reaper.ImGui_TableSetBgColor(ctx, reaper.ImGui_TableBgTarget_RowBg0(), 0x35404CFF)
       reaper.ImGui_TableHeader(ctx, label)
@@ -7243,7 +7702,7 @@ function X.draw()
     if #actions == 0 then
       reaper.ImGui_TableNextRow(ctx)
       reaper.ImGui_TableSetColumnIndex(ctx, 0)
-      reaper.ImGui_Text(ctx, "Liste vide. Ajoute une action avec les boutons +.")
+      reaper.ImGui_Text(ctx, X.T("Liste vide. Ajoute une action avec les boutons +."))
     else
       local move_from, move_to
       local delete_row
@@ -7334,7 +7793,7 @@ function X.draw()
                 end
                 if found_name then break end
               end
-              target_names[#target_names+1] = found_name or ("Cue introuvable " .. tostring(target_id))
+              target_names[#target_names+1] = found_name or (X.T("Cue introuvable ") .. tostring(target_id))
             end
             if #target_names > 0 then title_text = "STOP " .. table.concat(target_names, "/") end
           elseif a.type == "pause" or a.type == "devamp" then
@@ -7351,7 +7810,7 @@ function X.draw()
                 end
                 if found_name then break end
               end
-              names[#names+1] = '"' .. (found_name or ("Cue introuvable " .. tostring(target_id))) .. '"'
+              names[#names+1] = '"' .. (found_name or (X.T("Cue introuvable ") .. tostring(target_id))) .. '"'
             end
             local verb = a.type == "devamp" and "devamp" or (a.unpause == true and "unpause" or "pause")
             if #names > 0 then title_text = verb .. " " .. table.concat(names, ", ") end
@@ -7384,7 +7843,7 @@ function X.draw()
           if reaper.ImGui_IsItemDeactivated(ctx) or reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Enter(), false)
              or reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_KeypadEnter(), false) then
             if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape(), false) then
-              status = "Renommage annulé."
+              status = X.T("Renommage annulé.")
             else
               local nm = tostring(X.rename.buf or ""):gsub("^%s+", ""):gsub("%s+$", "")
               -- Comparaison avec title_text (nom réellement affiché) et non a.name :
@@ -7394,7 +7853,7 @@ function X.draw()
                 a.name = nm
                 a.custom_title = true
                 X.save()
-                status = "Renommé : " .. nm
+                status = X.T("Renommé : ") .. nm
               end
             end
             X.rename = nil
@@ -7517,9 +7976,9 @@ function X.draw()
           end
           if reaper.ImGui_IsItemHovered(ctx) and reaper.ImGui_SetTooltip then
             local tips = {
-              stop = "Stop", play = "En lecture : cliquer pour arrêter",
-              pause = "En pause : cliquer pour reprendre",
-              loop = "En boucle : cliquer pour sortir de la boucle (devamp) ; stop s'il n'y a pas de boucle",
+              stop = "Stop", play = X.T("En lecture : cliquer pour arrêter"),
+              pause = X.T("En pause : cliquer pour reprendre"),
+              loop = X.T("En boucle : cliquer pour sortir de la boucle (devamp) ; stop s'il n'y a pas de boucle"),
             }
             reaper.ImGui_SetTooltip(ctx, tips[mode])
           end
@@ -7567,32 +8026,32 @@ function X.draw()
             a.track = tg
             X.save()
             local trn = tg and X.find_track(tg)
-            status = "Piste de Q" .. tostring(a.id) .. " : " .. (trn and X.track_name(trn) or "(piste d'origine)")
+            status = X.T("Piste de Q") .. tostring(a.id) .. " : " .. (trn and X.track_name(trn) or X.T("(piste d'origine)"))
           end
         else
         local tr = X.find_track(a.track)
-        local cible = tr and X.track_name(tr) or (X.is_file_cue(a) and "(choisir)" or (X.is_region_cue(a) and "(origine)" or "-"))
+        local cible = tr and X.track_name(tr) or (X.is_file_cue(a) and X.T("(choisir)") or (X.is_region_cue(a) and X.T("(origine)") or "-"))
         if a.type == "snapshot" then
           X.ensure_snap(a)
-          cible = a.snap and (#a.snap.order.." piste(s)") or "-"
+          cible = a.snap and (#a.snap.order..X.T(" piste(s)")) or "-"
           if a.projfn and a.projfn ~= "" then
             local base = a.projfn:match("([^/\\]+)$") or a.projfn
             cible = cible .. " → " .. base
           end
         elseif a.type == "stop" or a.type == "pause" or a.type == "devamp" then
           local ids = X.resolve_targets(a)
-          cible = ids and (#ids.." cue(s)") or "toutes"
+          cible = ids and (#ids.." cue(s)") or X.T("toutes")
           if a.has_snapshot and a.snap_projfn and a.snap_projfn ~= "" then
             local base = a.snap_projfn:match("([^/\\]+)$") or a.snap_projfn
             cible = cible .. " + snapshot → " .. base
           end
         elseif a.type == "preset" then
           local pids = X.resolve_targets(a)
-          cible = (pids and (#pids .. " cue(s)") or "toutes") .. " → preset " .. tostring(tonumber(a.preset_id) or 0)
+          cible = (pids and (#pids .. " cue(s)") or X.T("toutes")) .. " → preset " .. tostring(tonumber(a.preset_id) or 0)
         elseif a.type == "osc" then
           cible = a.port_name ~= "" and a.port_name or "(port)"
         elseif a.type == "midi" then
-          cible = tr and X.track_name(tr) or "(piste)"
+          cible = tr and X.track_name(tr) or X.T("(piste)")
         end
         -- Pour AUDIO/REGION, projet du snapshot lié s'il est défini.
         if X.is_playable_cue(a) and a.has_snapshot and a.snap_projfn and a.snap_projfn ~= "" then
@@ -7619,7 +8078,7 @@ function X.draw()
         sel_i = nil
         for k, x in ipairs(actions) do if x.id == selected then sel_i = k; break end end
         X.save()
-        status = "Action supprimée : " .. tostring(da.name or da.id)
+        status = X.T("Action supprimée : ") .. tostring(da.name or da.id)
       end
     end
     reaper.ImGui_EndTable(ctx)
@@ -7638,9 +8097,9 @@ function X.draw()
     end
   end
   if #selected_ids > 0 then
-    reaper.ImGui_Text(ctx, "Sélection globale : " .. table.concat(selected_ids, ", "))
+    reaper.ImGui_Text(ctx, X.T("Sélection globale : ") .. table.concat(selected_ids, ", "))
     reaper.ImGui_SameLine(ctx)
-    if reaper.ImGui_SmallButton(ctx, "Vider la sélection") then picked, pick_anchor = {}, nil end
+    if reaper.ImGui_SmallButton(ctx, X.T("Vider la sélection")) then picked, pick_anchor = {}, nil end
   end
 
   -- Séparateur redimensionnable : glisser la poignée pour donner plus ou moins
@@ -7670,7 +8129,7 @@ function X.draw()
   reaper.ImGui_DrawList_AddText(sep_dl, sep_x + sep_w * 0.5 - X.S(18), sep_y, sep_col, "⋮⋮")
 
   if sel_i then
-    local open_ed = reaper.ImGui_CollapsingHeader(ctx, "Paramètres de l'action sélectionnée##edhdr", nil, reaper.ImGui_TreeNodeFlags_DefaultOpen())
+    local open_ed = reaper.ImGui_CollapsingHeader(ctx, X.T("Paramètres de l'action sélectionnée##edhdr"), nil, reaper.ImGui_TreeNodeFlags_DefaultOpen())
     X.ed_open = open_ed and true or false
     if open_ed then
       -- Défilement vertical dédié aux paramètres (comme la liste du haut).
@@ -7720,8 +8179,13 @@ function X.loop()
   local visible, open = reaper.ImGui_Begin(ctx, "Realive v1.5 — Actions##v2", true)
   if visible then
     if reaper.ImGui_SetWindowFontScale then reaper.ImGui_SetWindowFontScale(ctx, ui_scale) end
-    X.draw()
+    local draw_ok, draw_err = xpcall(X.draw, debug.traceback)
     reaper.ImGui_End(ctx)
+    if not draw_ok and draw_err ~= X.last_draw_err then
+      X.last_draw_err = draw_err
+      status = "Erreur : " .. tostring(draw_err):match("^[^\n]*")
+      reaper.ShowConsoleMsg("[Realive] " .. tostring(draw_err) .. "\n")
+    end
   end
   if pushed_bg > 0 then reaper.ImGui_PopStyleColor(ctx, pushed_bg) end
   if pushed_accent > 0 then reaper.ImGui_PopStyleColor(ctx, pushed_accent) end
@@ -7759,8 +8223,8 @@ do
   end)
   st = metro_state()
   status = (st == 1)
-    and "Realive v1.5 — métronome encore ON (toggle échoué)."
-    or "Realive v1.5 prêt — métronome off."
+    and X.T("Realive v1.5 — métronome encore ON (toggle échoué).")
+    or X.T("Realive v1.5 prêt — métronome off.")
 end
 
 reaper.defer(X.loop)
