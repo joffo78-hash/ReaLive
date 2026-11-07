@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Realive" commit="94f3969e2ca43b8fdb4379f6fedda40ae5c6d689">
+<index version="1" name="Realive" commit="c96c619bed5a2ba3493bf7a4135f8061b6ee0c07">
   <category name="Scripts/Realive">
     <reapack name="Realive.lua" type="script" desc="Realive — système de cues pour REAPER">
       <metadata>
@@ -50,6 +50,9 @@
       </version>
       <version name="1.71" author="joffo78-hash" time="2026-11-07T01:14:11Z">
         <source main="main">https://github.com/joffo78-hash/ReaLive/raw/94f3969e2ca43b8fdb4379f6fedda40ae5c6d689/Scripts/Realive/Realive.lua</source>
+      </version>
+      <version name="1.72" author="joffo78-hash" time="2026-11-07T08:32:27Z">
+        <source main="main">https://github.com/joffo78-hash/ReaLive/raw/c96c619bed5a2ba3493bf7a4135f8061b6ee0c07/Scripts/Realive/Realive.lua</source>
       </version>
     </reapack>
   </category>
